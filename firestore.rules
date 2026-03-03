@@ -1,0 +1,431 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userEmail() {
+      return request.auth.token.email;
+    }
+
+    function isGlobalAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/globalAdmins/$(request.auth.uid));
+    }
+
+    function teamDoc(teamId) {
+      return get(/databases/$(database)/documents/teams/$(teamId));
+    }
+
+    function teamExists(teamId) {
+      return exists(/databases/$(database)/documents/teams/$(teamId));
+    }
+
+    function hasTeamMemberUid(teamId) {
+      return teamExists(teamId)
+        && ('memberUids' in teamDoc(teamId).data)
+        && (teamDoc(teamId).data.memberUids is list)
+        && request.auth.uid in teamDoc(teamId).data.memberUids;
+    }
+
+    function memberDoc(teamId) {
+      return get(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid));
+    }
+
+    function hasMemberDoc(teamId) {
+      return exists(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid));
+    }
+
+    function ownTeamMembershipDoc(teamId) {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)/teamMemberships/$(teamId));
+    }
+
+    function hasOwnTeamMembershipDoc(teamId) {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)/teamMemberships/$(teamId));
+    }
+
+    function isTeamCreator(teamId) {
+      return isSignedIn()
+        && teamExists(teamId)
+        && teamDoc(teamId).data.createdBy == request.auth.uid;
+    }
+
+    function isTeamMember(teamId) {
+      return isTeamMemberByTeamDoc(teamId)
+        || (isSignedIn() && hasMemberDoc(teamId))
+        || (isSignedIn() && hasOwnTeamMembershipDoc(teamId));
+    }
+
+    function isTeamMemberByTeamDoc(teamId) {
+      return isSignedIn()
+        && (
+          isTeamCreator(teamId)
+          || hasTeamMemberUid(teamId)
+        );
+    }
+
+    function isTeamAdmin(teamId) {
+      return isSignedIn()
+        && (
+          isTeamCreator(teamId)
+          || (
+            hasMemberDoc(teamId)
+            && isAdminRole(memberDoc(teamId).data.role)
+          )
+          || (
+            hasOwnTeamMembershipDoc(teamId)
+            && isAdminRole(ownTeamMembershipDoc(teamId).data.role)
+          )
+        );
+    }
+
+    function isAdminRole(role) {
+      return role is string
+        && role.matches('^\\s*(admin|owner|team_admin|팀장)\\s*$');
+    }
+
+    function projectDoc(teamId, projectId) {
+      return get(/databases/$(database)/documents/teams/$(teamId)/projects/$(projectId));
+    }
+
+    function isProjectLeader(teamId, projectId) {
+      return isTeamMember(teamId) && projectDoc(teamId, projectId).data.leaderUserId == request.auth.uid;
+    }
+
+    function canWriteLiveCue(teamId, projectId) {
+      return isProjectLeader(teamId, projectId) || isTeamAdmin(teamId);
+    }
+
+    function inviteDoc(teamId) {
+      return get(/databases/$(database)/documents/teams/$(teamId)/invites/$(userEmail()));
+    }
+
+    function hasPendingInvite(teamId) {
+      return isSignedIn() && userEmail() != null
+        && exists(/databases/$(database)/documents/teams/$(teamId)/invites/$(userEmail()))
+        && inviteDoc(teamId).data.status == 'pending';
+    }
+
+    function inviteLinkDoc(teamId, inviteLinkId) {
+      return get(/databases/$(database)/documents/teams/$(teamId)/inviteLinks/$(inviteLinkId));
+    }
+
+    function hasActiveInviteLink(teamId, inviteLinkId) {
+      return isSignedIn()
+        && inviteLinkId is string
+        && exists(/databases/$(database)/documents/teams/$(teamId)/inviteLinks/$(inviteLinkId))
+        && inviteLinkDoc(teamId, inviteLinkId).data.status == 'active';
+    }
+
+    function isValidInviteRole(role) {
+      return role == 'member' || role == 'leader' || role == 'speaker' || role == 'admin';
+    }
+
+    function memberDocBelongsToRequester(memberData) {
+      return isSignedIn()
+        && (
+          memberData.userId == request.auth.uid
+          || memberData.uid == request.auth.uid
+          || (userEmail() != null && memberData.email == userEmail())
+        );
+    }
+
+    // Global songs (church-wide)
+    match /songs/{songId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isGlobalAdmin();
+
+      match /assets/{assetId} {
+        allow read: if isSignedIn();
+        allow create, update, delete: if isGlobalAdmin();
+      }
+    }
+
+    match /globalAdmins/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow create, update, delete: if false; // managed manually
+    }
+
+    match /teamNameIndex/{nameKey} {
+      allow get: if isSignedIn();
+      allow list: if false;
+      allow create: if isSignedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.teamId is string
+        && request.resource.data.teamId.size() > 0
+        && request.resource.data.teamName is string
+        && request.resource.data.teamName.size() > 0
+        && request.resource.data.teamName.size() <= 40
+        && request.resource.data.normalizedName == nameKey
+        && !exists(/databases/$(database)/documents/teamNameIndex/$(nameKey));
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && resource.data.teamId is string
+        && (
+          isTeamAdmin(resource.data.teamId)
+          || (
+            resource.data.createdBy == request.auth.uid
+            && !exists(/databases/$(database)/documents/teams/$(resource.data.teamId))
+          )
+        );
+    }
+
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+
+      match /teamMemberships/{teamId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if request.resource.data.teamId == teamId
+          && (
+            (
+              isSignedIn()
+              && request.auth.uid == userId
+              && (
+                (
+                  hasMemberDoc(teamId)
+                  && request.resource.data.role == memberDoc(teamId).data.role
+                )
+                || (
+                  isTeamCreator(teamId)
+                  && request.resource.data.role == 'admin'
+                )
+              )
+            )
+            || isTeamAdmin(teamId)
+          );
+        allow delete: if (isSignedIn() && request.auth.uid == userId) || isTeamAdmin(teamId);
+      }
+    }
+
+    match /teams/{teamId} {
+      // Query-safe list rule (team list on home screen).
+      allow list: if isGlobalAdmin() || isTeamMember(teamId);
+      // Per-document read rule (team detail).
+      allow get: if isGlobalAdmin() || isTeamMember(teamId);
+      allow create: if isSignedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 40
+        && request.resource.data.memberUids is list
+        && request.resource.data.memberUids.size() == 1
+        && request.resource.data.memberUids[0] == request.auth.uid;
+      allow update: if isTeamAdmin(teamId)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 40;
+      allow update: if isSignedIn()
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.name == resource.data.name
+        && request.resource.data.memberUids is list
+        && request.auth.uid in request.resource.data.memberUids
+        && (
+          (
+            resource.data.memberUids is list
+            && request.resource.data.memberUids.hasAll(resource.data.memberUids)
+            && request.resource.data.memberUids.size() == resource.data.memberUids.size() + 1
+            && !(request.auth.uid in resource.data.memberUids)
+          )
+          || (
+            !('memberUids' in resource.data)
+            && request.resource.data.memberUids.size() >= 1
+          )
+        )
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(['memberUids'])
+        && exists(/databases/$(database)/documents/teams/$(teamId)/members/$(request.auth.uid));
+      allow delete: if isTeamAdmin(teamId) || isTeamCreator(teamId);
+
+      match /members/{userId} {
+        // Keep list/get resilient even when legacy team docs miss memberUids.
+        allow list: if isGlobalAdmin()
+          || isTeamAdmin(teamId)
+          || (isSignedIn() && hasMemberDoc(teamId));
+        allow get: if isGlobalAdmin()
+          || isTeamAdmin(teamId)
+          || (isSignedIn() && (request.auth.uid == userId || hasMemberDoc(teamId)))
+          || memberDocBelongsToRequester(resource.data);
+        allow create: if isSignedIn() && request.auth.uid == userId
+          && request.resource.data.userId == request.auth.uid
+          && (!('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid)
+          && request.resource.data.email == userEmail()
+          && isValidInviteRole(request.resource.data.role)
+          && (
+            (
+              isTeamCreator(teamId)
+              && request.resource.data.role == 'admin'
+            )
+            || (
+              hasPendingInvite(teamId)
+              && inviteDoc(teamId).data.email == userEmail()
+              && request.resource.data.role == inviteDoc(teamId).data.role
+              && request.resource.data.teamName == inviteDoc(teamId).data.teamName
+            )
+            || (
+              hasActiveInviteLink(teamId, request.resource.data.inviteLinkId)
+              && request.resource.data.role == inviteLinkDoc(teamId, request.resource.data.inviteLinkId).data.role
+              && request.resource.data.teamName == inviteLinkDoc(teamId, request.resource.data.inviteLinkId).data.teamName
+            )
+          );
+        allow update: if (
+            isTeamAdmin(teamId)
+            && request.resource.data.userId == resource.data.userId
+            && (!('uid' in resource.data) || request.resource.data.uid == resource.data.uid)
+            && request.resource.data.email == resource.data.email
+            && request.resource.data.teamName == resource.data.teamName
+            && isValidInviteRole(request.resource.data.role)
+          )
+          || (
+            isSignedIn()
+            && request.auth.uid == userId
+            && request.resource.data.userId == resource.data.userId
+            && (!('uid' in resource.data) || request.resource.data.uid == resource.data.uid)
+            && request.resource.data.email == resource.data.email
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.teamName == resource.data.teamName
+            && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+              'nickname',
+              'displayName',
+              'updatedAt'
+            ])
+          );
+        allow delete: if isTeamAdmin(teamId);
+      }
+
+      match /invites/{inviteId} {
+        // Query-friendly list rule for collectionGroup('invites')
+        allow list: if isTeamAdmin(teamId)
+          || (isSignedIn() && userEmail() != null && userEmail() == resource.data.email);
+        allow get: if isTeamAdmin(teamId)
+          || (isSignedIn() && userEmail() != null && userEmail() == resource.data.email);
+        allow create: if isTeamAdmin(teamId)
+          && request.resource.data.email is string
+          && inviteId == request.resource.data.email
+          && request.resource.data.teamId == teamId
+          && request.resource.data.teamName is string
+          && isValidInviteRole(request.resource.data.role)
+          && request.resource.data.status == 'pending'
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update: if (isTeamAdmin(teamId)
+              && inviteId == resource.data.email
+              && request.resource.data.email == resource.data.email
+              && request.resource.data.teamId == resource.data.teamId
+              && request.resource.data.teamName == resource.data.teamName
+              && request.resource.data.createdBy == resource.data.createdBy
+              && request.resource.data.createdAt == resource.data.createdAt
+              && isValidInviteRole(request.resource.data.role))
+          || (isSignedIn() && userEmail() != null && userEmail() == resource.data.email
+              && resource.data.status == 'pending'
+              && request.resource.data.status == 'accepted'
+              && request.resource.data.email == resource.data.email
+              && request.resource.data.role == resource.data.role
+              && request.resource.data.teamId == resource.data.teamId
+              && request.resource.data.teamName == resource.data.teamName
+              && request.resource.data.createdBy == resource.data.createdBy
+              && request.resource.data.createdAt == resource.data.createdAt
+              && request.resource.data.acceptedBy == request.auth.uid);
+        allow delete: if isTeamAdmin(teamId);
+      }
+
+      match /inviteLinks/{inviteLinkId} {
+        allow get: if isTeamAdmin(teamId)
+          || isTeamMember(teamId)
+          || (isSignedIn() && resource.data.status == 'active');
+        allow list: if isTeamAdmin(teamId) || isTeamMember(teamId);
+        allow create: if isTeamAdmin(teamId)
+          && request.resource.data.teamId == teamId
+          && request.resource.data.teamName is string
+          && isValidInviteRole(request.resource.data.role)
+          && request.resource.data.status == 'active'
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update, delete: if isTeamAdmin(teamId);
+      }
+
+      // Team references to global songs (any team member can add)
+      match /songRefs/{songId} {
+        allow read: if isTeamMember(teamId);
+        allow create, update: if isTeamMember(teamId);
+        allow delete: if isTeamAdmin(teamId);
+      }
+
+      match /projects/{projectId} {
+        allow read: if isTeamMember(teamId);
+        allow create, update, delete: if isTeamAdmin(teamId) || isProjectLeader(teamId, projectId);
+
+        match /segmentA_setlist/{itemId} {
+          allow read: if isTeamMember(teamId);
+          allow create, update, delete: if isProjectLeader(teamId, projectId) || isTeamAdmin(teamId);
+        }
+
+        match /segmentB_application/{itemId} {
+          allow read: if isTeamMember(teamId);
+          allow create, update, delete: if isProjectLeader(teamId, projectId) || isTeamAdmin(teamId);
+        }
+
+        match /liveCue/{docId} {
+          allow read: if isTeamMember(teamId);
+          allow create, update, delete: if canWriteLiveCue(teamId, projectId);
+        }
+
+        match /sharedNotes/{noteId} {
+          allow read: if isTeamMember(teamId);
+          allow create, update, delete: if isTeamMember(teamId);
+        }
+      }
+
+      match /userSongNotes/{noteId} {
+        allow read: if isTeamMember(teamId) && resource.data.userId == request.auth.uid;
+        allow create: if isTeamMember(teamId) && request.resource.data.userId == request.auth.uid;
+        allow update, delete: if isTeamMember(teamId) && resource.data.userId == request.auth.uid;
+      }
+
+      match /userProjectNotes/{noteId} {
+        allow get: if isTeamMember(teamId)
+          && (
+            !exists(/databases/$(database)/documents/teams/$(teamId)/userProjectNotes/$(noteId))
+            || resource.data.userId == request.auth.uid
+            || (('ownerUserId' in resource.data) && resource.data.ownerUserId == request.auth.uid)
+          );
+        allow list: if isTeamMember(teamId)
+          && (
+            resource.data.userId == request.auth.uid
+            || (('ownerUserId' in resource.data) && resource.data.ownerUserId == request.auth.uid)
+          );
+        allow create: if isTeamMember(teamId)
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.ownerUserId == request.auth.uid
+          && request.resource.data.teamId == teamId
+          && request.resource.data.projectId is string
+          && exists(/databases/$(database)/documents/teams/$(teamId)/projects/$(request.resource.data.projectId))
+          && request.resource.data.visibility == 'private';
+        allow update: if isTeamMember(teamId)
+          && resource.data.userId == request.auth.uid
+          && (!('ownerUserId' in resource.data) || resource.data.ownerUserId == request.auth.uid)
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.ownerUserId == request.auth.uid
+          && request.resource.data.teamId == teamId
+          && request.resource.data.visibility == 'private'
+          && request.resource.data.projectId == resource.data.projectId;
+        allow delete: if isTeamAdmin(teamId)
+          || (
+            isTeamMember(teamId)
+            && resource.data.userId == request.auth.uid
+            && (!('ownerUserId' in resource.data) || resource.data.ownerUserId == request.auth.uid)
+          );
+      }
+
+      // Legacy team songs (read-only during migration)
+      match /songs/{songId} {
+        allow read: if isTeamMember(teamId) || isGlobalAdmin();
+        match /assets/{assetId} {
+          allow read: if isTeamMember(teamId) || isGlobalAdmin();
+          allow create, update, delete: if false;
+        }
+        allow create, update, delete: if false;
+      }
+    }
+  }
+}

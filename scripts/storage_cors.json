@@ -1,0 +1,23 @@
+[
+  {
+    "origin": [
+      "https://worshipflow-df2ce.web.app",
+      "https://worshipflow-df2ce.firebaseapp.com",
+      "http://localhost:3000",
+      "http://localhost:5000",
+      "http://localhost:7357",
+      "http://localhost:8080"
+    ],
+    "method": ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+    "responseHeader": [
+      "Content-Type",
+      "Authorization",
+      "x-goog-meta-*",
+      "x-goog-resumable",
+      "x-goog-upload-command",
+      "x-goog-upload-offset",
+      "x-goog-upload-protocol"
+    ],
+    "maxAgeSeconds": 3600
+  }
+]

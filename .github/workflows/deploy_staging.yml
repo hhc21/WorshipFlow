@@ -1,0 +1,115 @@
+name: deploy-staging
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    env:
+      COVERAGE_MIN: ${{ vars.COVERAGE_MIN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test with coverage
+        run: flutter test --coverage
+
+      - name: Install lcov (best effort)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov || true
+
+      - name: Coverage gate
+        run: |
+          chmod +x scripts/ci/check_coverage.sh
+          scripts/ci/check_coverage.sh
+
+      - name: Build web release
+        run: flutter build web --release
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: preflight
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Setup Firebase auth
+        shell: bash
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${FIREBASE_SERVICE_ACCOUNT_JSON:-}" ]]; then
+            printf '%s' "$FIREBASE_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/firebase-sa.json"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/firebase-sa.json" >> "$GITHUB_ENV"
+            echo "FIREBASE_AUTH_MODE=service_account" >> "$GITHUB_ENV"
+          elif [[ -n "${FIREBASE_TOKEN:-}" ]]; then
+            echo "FIREBASE_AUTH_MODE=token" >> "$GITHUB_ENV"
+          else
+            echo "::error::Missing Firebase auth secret. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_TOKEN."
+            exit 1
+          fi
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build web release
+        run: flutter build web --release
+
+      - name: Deploy to Firebase (staging)
+        shell: bash
+        env:
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${FIREBASE_PROJECT_ID:-}" ]]; then
+            echo "::error::Missing FIREBASE_PROJECT_ID secret in staging environment."
+            exit 1
+          fi
+
+          if [[ "${FIREBASE_AUTH_MODE:-}" == "token" ]]; then
+            firebase deploy \
+              --project "$FIREBASE_PROJECT_ID" \
+              --only hosting,firestore:rules,storage \
+              --token "$FIREBASE_TOKEN"
+          else
+            firebase deploy \
+              --project "$FIREBASE_PROJECT_ID" \
+              --only hosting,firestore:rules,storage
+          fi
+

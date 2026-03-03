@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="$FLUTTER_BASE_HREF">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="WorshipFlow: 찬양팀 콘티/LiveCue/악보 운영 웹 앱">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="WorshipFlow">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png?v=20260221">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png?v=20260221"/>
+
+  <title>WorshipFlow</title>
+  <link rel="manifest" href="manifest.json?v=20260221">
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #f3f5fb;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #splash {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      color: #1f2937;
+      z-index: 9999;
+      background: linear-gradient(180deg, #f7f9ff 0%, #eef2ff 100%);
+      transition: opacity 220ms ease;
+    }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 3px solid #c7d2fe;
+      border-top-color: #1d4ed8;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <div id="splash">
+    <strong>WorshipFlow</strong>
+    <div class="spinner"></div>
+    <small>로딩 중...</small>
+  </div>
+  <script>
+    window.addEventListener('flutter-first-frame', function () {
+      var splash = document.getElementById('splash');
+      if (!splash) return;
+      splash.style.opacity = '0';
+      setTimeout(function () { splash.remove(); }, 240);
+    });
+  </script>
+  <script>
+    // Avoid stale bundles from older Flutter service workers during active development.
+    (function () {
+      if (!('serviceWorker' in navigator)) return;
+      navigator.serviceWorker.getRegistrations().then(function (registrations) {
+        if (!registrations || registrations.length === 0) return;
+        return Promise.all(registrations.map(function (reg) { return reg.unregister(); }))
+          .then(function () {
+            if (window.sessionStorage.getItem('wf_sw_cleared') === '1') return;
+            window.sessionStorage.setItem('wf_sw_cleared', '1');
+            window.location.reload();
+          });
+      }).catch(function () {});
+    })();
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

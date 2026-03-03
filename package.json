@@ -1,0 +1,20 @@
+{
+  "name": "worshipflow",
+  "version": "1.0.0",
+  "description": "카카오톡으로 하던 금요기도회 운영 흐름을 웹앱으로 통합하는 Flutter Web + Firebase MVP입니다.",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "firebase-admin": "^13.6.0"
+  }
+}

@@ -1,0 +1,112 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isGlobalAdmin() {
+      return isSignedIn()
+        && firestore.exists(/databases/(default)/documents/globalAdmins/$(request.auth.uid));
+    }
+
+    function teamDoc(teamId) {
+      return firestore.get(/databases/(default)/documents/teams/$(teamId));
+    }
+
+    function teamExists(teamId) {
+      return firestore.exists(/databases/(default)/documents/teams/$(teamId));
+    }
+
+    function hasTeamMemberUid(teamId) {
+      return teamExists(teamId)
+        && ('memberUids' in teamDoc(teamId).data)
+        && (teamDoc(teamId).data.memberUids is list)
+        && request.auth.uid in teamDoc(teamId).data.memberUids;
+    }
+
+    function isTeamCreator(teamId) {
+      return isSignedIn()
+        && teamExists(teamId)
+        && teamDoc(teamId).data.createdBy == request.auth.uid;
+    }
+
+    function isAdminRole(role) {
+      return role is string
+        && role.matches('^\\s*(admin|owner|team_admin|팀장)\\s*$');
+    }
+
+    function ownTeamMembershipDoc(teamId) {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)/teamMemberships/$(teamId));
+    }
+
+    function hasOwnTeamMembershipDoc(teamId) {
+      return firestore.exists(/databases/(default)/documents/users/$(request.auth.uid)/teamMemberships/$(teamId));
+    }
+
+    function isTeamMember(teamId) {
+      return isSignedIn()
+        && (
+          isTeamCreator(teamId)
+          || hasTeamMemberUid(teamId)
+          || firestore.exists(/databases/(default)/documents/teams/$(teamId)/members/$(request.auth.uid))
+          || hasOwnTeamMembershipDoc(teamId)
+        );
+    }
+
+    function isTeamAdmin(teamId) {
+      return isSignedIn()
+        && (
+          isTeamCreator(teamId)
+          || (
+            firestore.exists(/databases/(default)/documents/teams/$(teamId)/members/$(request.auth.uid))
+            && isAdminRole(
+              firestore.get(/databases/(default)/documents/teams/$(teamId)/members/$(request.auth.uid)).data.role
+            )
+          )
+          || (
+            hasOwnTeamMembershipDoc(teamId)
+            && isAdminRole(ownTeamMembershipDoc(teamId).data.role)
+          )
+        );
+    }
+
+    function hasSafeSize() {
+      return request.resource == null || request.resource.size < 25 * 1024 * 1024;
+    }
+
+    function isAllowedSongAssetType() {
+      return request.resource == null
+        || (
+          request.resource.contentType != null
+          && (
+            request.resource.contentType.matches('image/.*')
+            || request.resource.contentType == 'application/pdf'
+          )
+        );
+    }
+
+    function isAllowedTeamAssetType() {
+      return request.resource == null
+        || (
+          request.resource.contentType != null
+          && (
+            request.resource.contentType.matches('image/.*')
+            || request.resource.contentType == 'application/pdf'
+          )
+        );
+    }
+
+    match /songs/{songId}/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isGlobalAdmin() && hasSafeSize() && isAllowedSongAssetType();
+    }
+
+    match /teams/{teamId}/{allPaths=**} {
+      allow read: if isTeamMember(teamId) || isGlobalAdmin();
+      allow write: if (isTeamAdmin(teamId) || isGlobalAdmin())
+        && hasSafeSize()
+        && isAllowedTeamAssetType();
+    }
+  }
+}
