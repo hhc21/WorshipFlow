@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
 import '../../services/firebase_providers.dart';
@@ -341,8 +342,7 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
     FirebaseStorage storage,
     String songId,
     String songTitle,
-    bool isAdmin,
-    bool adminLoading,
+    bool canInlineEdit,
   ) async {
     await showModalBottomSheet<void>(
       context: context,
@@ -367,7 +367,7 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
                               style: Theme.of(context).textTheme.titleLarge,
                             ),
                           ),
-                          if (!adminLoading && isAdmin)
+                          if (canInlineEdit)
                             FilledButton.tonalIcon(
                               onPressed: _uploadingSongId == songId
                                   ? null
@@ -429,7 +429,7 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
                                   return AppStateCard(
                                     icon: Icons.upload_file_rounded,
                                     title: '등록된 악보가 없습니다',
-                                    message: isAdmin
+                                    message: canInlineEdit
                                         ? '오른쪽 위 [악보 업로드]로 첫 파일을 등록해 주세요.'
                                         : '운영자에게 악보 업로드를 요청해 주세요.',
                                   );
@@ -518,6 +518,9 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
     final adminValue = ref.watch(globalAdminProvider);
     final isAdmin = adminValue.value ?? false;
     final adminLoading = adminValue.isLoading;
+    final canInlineEdit =
+        isAdmin &&
+        (ModalRoute.of(context)?.settings.name == '/admin-inline-edit');
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -525,7 +528,7 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
         Text('전역 악보 관리', style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 8),
         Text(
-          '팀과 관계없이 전역 곡을 추가하고 악보를 업로드합니다.',
+          '팀과 관계없이 전역 곡을 검색하고 악보를 조회합니다.',
           style: Theme.of(context).textTheme.bodyMedium,
         ),
         if (adminLoading) ...[
@@ -536,6 +539,23 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
           Text(
             '읽기 전용: 운영자만 전역 곡 생성/악보 업로드/수정이 가능합니다.',
             style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ] else ...[
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              Text(
+                '관리 기능(곡 추가/수정/업로드)은 운영자 도구에서만 수행합니다.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              TextButton.icon(
+                onPressed: () => context.go('/admin'),
+                icon: const Icon(Icons.admin_panel_settings_outlined),
+                label: const Text('운영자 도구 열기'),
+              ),
+            ],
           ),
         ],
         const SizedBox(height: 12),
@@ -603,12 +623,11 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
                                   storage,
                                   doc.id,
                                   data['title']?.toString() ?? '곡',
-                                  isAdmin,
-                                  adminLoading,
+                                  canInlineEdit,
                                 ),
                                 child: const Text('악보 목록'),
                               ),
-                              if (isAdmin)
+                              if (canInlineEdit)
                                 TextButton(
                                   onPressed: _uploadingSongId == doc.id
                                       ? null
@@ -642,85 +661,87 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
             );
           },
         ),
-        const SizedBox(height: 24),
-        Text('전역 곡 새로 추가', style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
-        Card(
-          color: Theme.of(context).colorScheme.surfaceContainerHighest,
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: const [
-                Row(
-                  children: [
-                    Text(
-                      '입력 가이드',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    Spacer(),
-                    CircleOfFifthsHelpButton(label: '5도권 참고', compact: true),
-                  ],
-                ),
-                SizedBox(height: 6),
-                Text('• 곡 제목은 순수 제목만 입력합니다.'),
-                Text('• 키는 콘티/LiveCue 입력에서 “D 곡명” 형태로 입력하세요.'),
-                Text('• 악보 파일명 예시: [D 곡명].pdf (키 자동 필터용)'),
-              ],
+        if (canInlineEdit) ...[
+          const SizedBox(height: 24),
+          Text('전역 곡 새로 추가', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Card(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Row(
+                    children: [
+                      Text(
+                        '입력 가이드',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      Spacer(),
+                      CircleOfFifthsHelpButton(label: '5도권 참고', compact: true),
+                    ],
+                  ),
+                  SizedBox(height: 6),
+                  Text('• 곡 제목은 순수 제목만 입력합니다.'),
+                  Text('• 키는 콘티/LiveCue 입력에서 “D 곡명” 형태로 입력하세요.'),
+                  Text('• 악보 파일명 예시: [D 곡명].pdf (키 자동 필터용)'),
+                ],
+              ),
             ),
           ),
-        ),
-        const SizedBox(height: 12),
-        TextField(
-          controller: _titleController,
-          decoration: const InputDecoration(
-            labelText: '곡 제목',
-            helperText: '예: 주의 집에 거하는 자',
-            hintText: '[주의 집에 거하는 자 D]',
-            border: OutlineInputBorder(),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _titleController,
+            decoration: const InputDecoration(
+              labelText: '곡 제목',
+              helperText: '예: 주의 집에 거하는 자',
+              hintText: '[주의 집에 거하는 자 D]',
+              border: OutlineInputBorder(),
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _keyController,
-          decoration: const InputDecoration(
-            labelText: '키 (선택)',
-            hintText: '예: D, Eb, F#',
-            border: OutlineInputBorder(),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _keyController,
+            decoration: const InputDecoration(
+              labelText: '키 (선택)',
+              hintText: '예: D, Eb, F#',
+              border: OutlineInputBorder(),
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _aliasController,
-          decoration: const InputDecoration(
-            labelText: '별칭 (쉼표로 구분)',
-            border: OutlineInputBorder(),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _aliasController,
+            decoration: const InputDecoration(
+              labelText: '별칭 (쉼표로 구분)',
+              border: OutlineInputBorder(),
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
-        TextField(
-          controller: _tagsController,
-          decoration: const InputDecoration(
-            labelText: '태그 (쉼표로 구분)',
-            border: OutlineInputBorder(),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _tagsController,
+            decoration: const InputDecoration(
+              labelText: '태그 (쉼표로 구분)',
+              border: OutlineInputBorder(),
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerRight,
-          child: ElevatedButton(
-            onPressed: !isAdmin || _saving || adminLoading
-                ? null
-                : () => _createGlobalSong(context),
-            child: _saving
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Text('전역 곡 추가'),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerRight,
+            child: ElevatedButton(
+              onPressed: _saving || adminLoading
+                  ? null
+                  : () => _createGlobalSong(context),
+              child: _saving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('전역 곡 추가'),
+            ),
           ),
-        ),
+        ],
       ],
     );
   }

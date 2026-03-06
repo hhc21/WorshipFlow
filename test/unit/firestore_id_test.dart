@@ -20,4 +20,20 @@ void main() {
       expect(isValidFirestoreDocId('abc/123'), isFalse);
     });
   });
+
+  group('private project note doc ids', () {
+    test('builds deterministic v2 doc id', () {
+      expect(
+        privateProjectNoteDocIdV2('2026.03.01', 'user-1'),
+        'v2__2026.03.01__user-1',
+      );
+    });
+
+    test('builds deterministic legacy doc id', () {
+      expect(
+        privateProjectNoteDocIdLegacy('2026.03.01', 'user-1'),
+        '2026.03.01__user-1',
+      );
+    });
+  });
 }

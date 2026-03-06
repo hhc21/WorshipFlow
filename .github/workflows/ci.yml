@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -14,14 +18,22 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COVERAGE_MIN: ${{ vars.COVERAGE_MIN }}
+      COVERAGE_STAGE: ${{ vars.COVERAGE_STAGE }}
+      WF_FIRESTORE_TRANSPORT: long-polling
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify storage CORS policy file
+        run: |
+          chmod +x scripts/ci/verify_storage_cors_policy.sh
+          scripts/ci/verify_storage_cors_policy.sh
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Flutter pub get
         run: flutter pub get
@@ -31,6 +43,11 @@ jobs:
 
       - name: Run tests with coverage
         run: flutter test --coverage
+
+      - name: Verify deploy gate policy
+        run: |
+          chmod +x scripts/ci/verify_deploy_gates.sh
+          scripts/ci/verify_deploy_gates.sh
 
       - name: Install lcov (best effort)
         run: |
@@ -43,7 +60,10 @@ jobs:
           scripts/ci/check_coverage.sh
 
       - name: Build web release
-        run: flutter build web --release
+        run: |
+          flutter build web --release --dart-define=WF_FIRESTORE_TRANSPORT=${WF_FIRESTORE_TRANSPORT}
+          chmod +x scripts/ci/ensure_flutter_sourcemap_stub.sh
+          scripts/ci/ensure_flutter_sourcemap_stub.sh
 
       - name: Upload web artifact
         uses: actions/upload-artifact@v4
@@ -51,3 +71,28 @@ jobs:
           name: web-build
           path: build/web
 
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Setup Java (Firestore emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Firestore rules self-healing suite
+        run: |
+          chmod +x scripts/ci/test_rules.sh
+          scripts/ci/test_rules.sh

@@ -9,9 +9,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
+import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
+import '../../services/ops_metrics.dart';
 import '../../services/song_search.dart';
 import '../../utils/browser_helpers.dart';
+import '../../utils/firestore_id.dart';
 import '../../utils/song_parser.dart';
 import '../../utils/storage_helpers.dart';
 
@@ -42,14 +45,6 @@ CollectionReference<Map<String, dynamic>> _setlistRefFor(
       .collection('segmentA_setlist');
 }
 
-String _privateProjectNoteDocIdV2(String projectId, String userId) {
-  return 'v2__${projectId}__$userId';
-}
-
-String _privateProjectNoteDocIdLegacy(String projectId, String userId) {
-  return '${projectId}__$userId';
-}
-
 DocumentReference<Map<String, dynamic>> _privateProjectNoteRefFor(
   FirebaseFirestore firestore,
   String teamId,
@@ -60,7 +55,7 @@ DocumentReference<Map<String, dynamic>> _privateProjectNoteRefFor(
       .collection('teams')
       .doc(teamId)
       .collection('userProjectNotes')
-      .doc(_privateProjectNoteDocIdV2(projectId, userId));
+      .doc(privateProjectNoteDocIdV2(projectId, userId));
 }
 
 DocumentReference<Map<String, dynamic>> _sharedProjectNoteRefFor(
@@ -127,23 +122,6 @@ String _lineText({
   return parts.join(' ');
 }
 
-String _normalizeMemberRole(String? role) {
-  final normalized = (role ?? '').trim().toLowerCase();
-  switch (normalized) {
-    case 'admin':
-    case 'owner':
-    case 'team_admin':
-    case '팀장':
-      return 'admin';
-    case 'leader':
-    case 'speaker':
-    case '인도자':
-      return 'leader';
-    default:
-      return 'member';
-  }
-}
-
 const List<int> _liveCueDrawingPalette = <int>[
   0xFFD32F2F,
   0xFF1976D2,
@@ -152,6 +130,9 @@ const List<int> _liveCueDrawingPalette = <int>[
   0xFF000000,
   0xFFFFFFFF,
 ];
+
+const Duration _webSetlistPollInterval = Duration(milliseconds: 3500);
+const Duration _webCuePollInterval = Duration(milliseconds: 1000);
 
 Future<SongCandidate?> _matchSongAutomatically(
   FirebaseFirestore firestore,
@@ -506,7 +487,8 @@ class LiveCuePage extends ConsumerStatefulWidget {
 class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   final FocusNode _focusNode = FocusNode();
   final Map<String, Future<List<String>>> _songKeysFutureCache = {};
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> _latestSetlist = const [];
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _latestSetlist =
+      <QueryDocumentSnapshot<Map<String, dynamic>>>[];
   Map<String, dynamic> _latestCueData = const <String, dynamic>{};
   bool _autoSeeding = false;
   bool _saving = false;
@@ -1165,10 +1147,20 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
   final TransformationController _viewerController = TransformationController();
   final ValueNotifier<int> _strokeRevision = ValueNotifier<int>(0);
   final Map<String, Future<_LiveCueAssetPreview?>> _previewCache = {};
+  final Map<String, _LiveCueAssetPreview> _resolvedPreviewCache = {};
+  final Set<String> _prefetchedPreviewKeys = <String>{};
+  final Set<String> _queuedPrefetchKeys = <String>{};
   final Map<String, Future<List<String>>> _songKeysFutureCache = {};
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> _latestSetlist = const [];
+  String? _webPollingScopeKey;
+  Stream<QuerySnapshot<Map<String, dynamic>>>? _webSetlistStream;
+  Stream<DocumentSnapshot<Map<String, dynamic>>>? _webCueStream;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _latestSetlist =
+      <QueryDocumentSnapshot<Map<String, dynamic>>>[];
   Map<String, dynamic> _latestCueData = const <String, dynamic>{};
   String? _activeViewerAssetKey;
+  String? _activeImageRendererKey;
+  bool _fallbackToHtmlImageElement = false;
+  bool _switchingImageRenderer = false;
   bool _autoSeeding = false;
   bool _moving = false;
   bool _showOverlay = true;
@@ -1246,11 +1238,16 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
               // assets never appear until full page reload.
               if (preview == null) {
                 _previewCache.remove(cacheKey);
+                _resolvedPreviewCache.remove(cacheKey);
+              }
+              if (preview != null) {
+                _resolvedPreviewCache[cacheKey] = preview;
               }
               return preview;
             })
             .catchError((error, stackTrace) {
               _previewCache.remove(cacheKey);
+              _resolvedPreviewCache.remove(cacheKey);
               throw error;
             });
     _previewCache[cacheKey] = future;
@@ -1273,6 +1270,13 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     _viewerController.value = Matrix4.identity();
   }
 
+  void _syncImageRendererKey(String key) {
+    if (_activeImageRendererKey == key) return;
+    _activeImageRendererKey = key;
+    _fallbackToHtmlImageElement = false;
+    _switchingImageRenderer = false;
+  }
+
   void _warmPreview(
     FirebaseFirestore firestore,
     FirebaseStorage storage,
@@ -1283,7 +1287,160 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     final safeSongId = songId?.trim() ?? '';
     final safeTitle = fallbackTitle?.trim() ?? '';
     if (safeSongId.isEmpty && safeTitle.isEmpty) return;
-    _loadPreviewCached(firestore, storage, safeSongId, keyText, safeTitle);
+    final cacheKey = _previewCacheKey(safeSongId, keyText, safeTitle);
+    final previewFuture = _loadPreviewCached(
+      firestore,
+      storage,
+      safeSongId,
+      keyText,
+      safeTitle,
+    );
+    _queuePreviewPrefetch(cacheKey, previewFuture);
+  }
+
+  void _queuePreviewPrefetch(
+    String cacheKey,
+    Future<_LiveCueAssetPreview?> previewFuture,
+  ) {
+    if (_prefetchedPreviewKeys.contains(cacheKey)) return;
+    if (!_queuedPrefetchKeys.add(cacheKey)) return;
+    unawaited(
+      previewFuture
+          .then((preview) async {
+            if (!mounted || preview == null || !preview.isImage) return;
+            final bytes = preview.initialBytes;
+            if (bytes == null || bytes.isEmpty) {
+              // Web prefetch via XHR is CORS-sensitive for token URLs.
+              // Runtime viewer uses WebHtmlElementStrategy.prefer instead.
+              if (kIsWeb) return;
+            }
+            final ImageProvider<Object> provider =
+                bytes != null && bytes.isNotEmpty
+                ? MemoryImage(bytes)
+                : NetworkImage(preview.url);
+            await precacheImage(provider, context);
+            _prefetchedPreviewKeys.add(cacheKey);
+          })
+          .catchError((_) {
+            // Prefetch is best effort only.
+          })
+          .whenComplete(() {
+            _queuedPrefetchKeys.remove(cacheKey);
+          }),
+    );
+  }
+
+  void _ensureWebPollingStreams(
+    Query<Map<String, dynamic>> setlistQuery,
+    DocumentReference<Map<String, dynamic>> liveCueRef,
+  ) {
+    if (!kIsWeb) return;
+    final scopeKey = '${widget.teamId}/${widget.projectId}';
+    if (_webPollingScopeKey == scopeKey &&
+        _webSetlistStream != null &&
+        _webCueStream != null) {
+      return;
+    }
+    _webPollingScopeKey = scopeKey;
+    _webSetlistStream = _setlistPollingStream(setlistQuery).asBroadcastStream();
+    _webCueStream = _liveCuePollingStream(liveCueRef).asBroadcastStream();
+  }
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> _setlistPollingStream(
+    Query<Map<String, dynamic>> query,
+  ) async* {
+    QuerySnapshot<Map<String, dynamic>>? lastGoodSnapshot;
+    String? lastSignature;
+    while (mounted) {
+      try {
+        final snapshot = await query.get().timeout(const Duration(seconds: 12));
+        final signature = _setlistSignature(snapshot);
+        if (signature != lastSignature) {
+          lastSignature = signature;
+          lastGoodSnapshot = snapshot;
+          yield snapshot;
+        }
+      } catch (_) {
+        if (lastGoodSnapshot != null) {
+          yield lastGoodSnapshot;
+        }
+      }
+      await Future<void>.delayed(_webSetlistPollInterval);
+    }
+  }
+
+  Stream<DocumentSnapshot<Map<String, dynamic>>> _liveCuePollingStream(
+    DocumentReference<Map<String, dynamic>> docRef,
+  ) async* {
+    DocumentSnapshot<Map<String, dynamic>>? lastGoodSnapshot;
+    String? lastSignature;
+    while (mounted) {
+      try {
+        final snapshot = await docRef.get().timeout(
+          const Duration(seconds: 12),
+        );
+        final signature = _liveCueSignature(snapshot);
+        if (signature != lastSignature) {
+          lastSignature = signature;
+          lastGoodSnapshot = snapshot;
+          yield snapshot;
+        }
+      } catch (_) {
+        if (lastGoodSnapshot != null) {
+          yield lastGoodSnapshot;
+        }
+      }
+      await Future<void>.delayed(_webCuePollInterval);
+    }
+  }
+
+  String _setlistSignature(QuerySnapshot<Map<String, dynamic>> snapshot) {
+    if (snapshot.docs.isEmpty) return '<empty>';
+    final buffer = StringBuffer();
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      buffer
+        ..write(doc.id)
+        ..write('|')
+        ..write(data['order'])
+        ..write('|')
+        ..write(data['songId'])
+        ..write('|')
+        ..write(data['displayTitle'])
+        ..write('|')
+        ..write(data['freeTextTitle'])
+        ..write('|')
+        ..write(data['keyText'])
+        ..write(';');
+    }
+    return buffer.toString();
+  }
+
+  String _liveCueSignature(DocumentSnapshot<Map<String, dynamic>> snapshot) {
+    final data = snapshot.data() ?? const <String, dynamic>{};
+    final watchedKeys = <String>[
+      'currentSongId',
+      'currentDisplayTitle',
+      'currentFreeTextTitle',
+      'currentKeyText',
+      'currentCueLabel',
+      'nextSongId',
+      'nextDisplayTitle',
+      'nextFreeTextTitle',
+      'nextKeyText',
+      'nextCueLabel',
+      'updatedAt',
+      'updatedBy',
+    ];
+    final buffer = StringBuffer(snapshot.id);
+    for (final key in watchedKeys) {
+      buffer
+        ..write('|')
+        ..write(key)
+        ..write('=')
+        ..write(data[key]);
+    }
+    return buffer.toString();
   }
 
   void _scheduleOverlayAutoHide() {
@@ -1333,10 +1490,18 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
         .collection('teams')
         .doc(widget.teamId)
         .collection('userProjectNotes')
-        .doc(_privateProjectNoteDocIdLegacy(widget.projectId, userId))
+        .doc(privateProjectNoteDocIdLegacy(widget.projectId, userId))
         .get();
     final legacyData = legacyDoc.data();
     if (legacyData != null) {
+      unawaited(
+        logLegacyFallbackUsage(
+          firestore: firestore,
+          teamId: widget.teamId,
+          path: 'live_cue.legacy_doc_id',
+          detail: widget.projectId,
+        ),
+      );
       final merged = {
         ...legacyData,
         'visibility': 'private',
@@ -1360,7 +1525,15 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
         .where('projectId', isEqualTo: widget.projectId)
         .limit(1)
         .get();
-    if (legacyQuery.docs.isEmpty) return const _LiveCueNotePayload();
+    if (legacyQuery.docs.isEmpty) return _LiveCueNotePayload();
+    unawaited(
+      logLegacyFallbackUsage(
+        firestore: firestore,
+        teamId: widget.teamId,
+        path: 'live_cue.legacy_query',
+        detail: widget.projectId,
+      ),
+    );
     final queryData = legacyQuery.docs.first.data();
     final merged = {
       ...queryData,
@@ -1386,7 +1559,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
       widget.projectId,
     ).get();
     final data = doc.data();
-    if (data == null) return const _LiveCueNotePayload();
+    if (data == null) return _LiveCueNotePayload();
     return _LiveCueNotePayload.fromMap(data);
   }
 
@@ -1408,8 +1581,12 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
       setState(() {
         _privateNoteContent = privatePayload.text;
         _sharedNoteContent = sharedPayload.text;
-        _privateLayerStrokes = privatePayload.strokes;
-        _sharedLayerStrokes = sharedPayload.strokes;
+        _privateLayerStrokes = List<_LiveCueSketchStroke>.from(
+          privatePayload.strokes,
+        );
+        _sharedLayerStrokes = List<_LiveCueSketchStroke>.from(
+          sharedPayload.strokes,
+        );
         _noteLayersLoaded = true;
         _noteLayersKey = key;
       });
@@ -1582,6 +1759,11 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     setState(() {
       _drawingEnabled = value;
       _showOverlay = true;
+      if (value && _fallbackToHtmlImageElement) {
+        // Prefer canvas-backed renderer while drawing to keep pointer events stable.
+        _fallbackToHtmlImageElement = false;
+        _switchingImageRenderer = false;
+      }
       if (!value) {
         _activeLayerStroke = null;
         _eraserEnabled = false;
@@ -1897,8 +2079,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
         final projectData = contextData.project.data()!;
         final leaderId = projectData['leaderUserId']?.toString();
         final role = contextData.member.data()?['role']?.toString();
-        final canEdit =
-            leaderId == user.uid || _normalizeMemberRole(role) == 'admin';
+        final canEdit = leaderId == user.uid || isAdminRole(role);
         final noteLayersKey =
             '${widget.teamId}/${widget.projectId}/${user.uid}';
         if ((!_noteLayersLoaded || _noteLayersKey != noteLayersKey) &&
@@ -1919,6 +2100,12 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
           widget.teamId,
           widget.projectId,
         );
+        final setlistQuery = setlistRef.orderBy('order');
+        _ensureWebPollingStreams(setlistQuery, liveCueRef);
+        final setlistStream = kIsWeb
+            ? _webSetlistStream!
+            : setlistQuery.snapshots();
+        final cueStream = kIsWeb ? _webCueStream! : liveCueRef.snapshots();
 
         return Scaffold(
           backgroundColor: Colors.black,
@@ -1958,7 +2145,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                 return KeyEventResult.ignored;
               },
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                stream: setlistRef.orderBy('order').snapshots(),
+                stream: setlistStream,
                 builder: (context, setlistSnapshot) {
                   if (setlistSnapshot.connectionState ==
                       ConnectionState.waiting) {
@@ -1978,7 +2165,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                   _latestSetlist = items;
 
                   return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                    stream: liveCueRef.snapshots(),
+                    stream: cueStream,
                     builder: (context, cueSnapshot) {
                       if (cueSnapshot.connectionState ==
                           ConnectionState.waiting) {
@@ -2028,6 +2215,13 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                               ? _titleFromItem(items[currentIndex].data())
                               : '현재 곡 없음');
                       final currentKey = cueData['currentKeyText']?.toString();
+                      final currentPreviewCacheKey = _previewCacheKey(
+                        currentSongId?.trim() ?? '',
+                        currentKey,
+                        currentTitle,
+                      );
+                      final cachedCurrentPreview =
+                          _resolvedPreviewCache[currentPreviewCacheKey];
                       final nextSongId = cueData['nextSongId']?.toString();
                       final nextKey = cueData['nextKeyText']?.toString();
                       final nextTitle =
@@ -2071,29 +2265,33 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                         children: [
                           Positioned.fill(
                             child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: _toggleOverlay,
-                              onHorizontalDragEnd: (details) {
-                                if (_drawingEnabled) return;
-                                final velocity = details.primaryVelocity ?? 0;
-                                if (velocity > 220) {
-                                  _moveByStep(
-                                    firestore,
-                                    canEdit,
-                                    items,
-                                    cueData,
-                                    -1,
-                                  );
-                                } else if (velocity < -220) {
-                                  _moveByStep(
-                                    firestore,
-                                    canEdit,
-                                    items,
-                                    cueData,
-                                    1,
-                                  );
-                                }
-                              },
+                              behavior: _drawingEnabled
+                                  ? HitTestBehavior.deferToChild
+                                  : HitTestBehavior.opaque,
+                              onTap: _drawingEnabled ? null : _toggleOverlay,
+                              onHorizontalDragEnd: _drawingEnabled
+                                  ? null
+                                  : (details) {
+                                      final velocity =
+                                          details.primaryVelocity ?? 0;
+                                      if (velocity > 220) {
+                                        _moveByStep(
+                                          firestore,
+                                          canEdit,
+                                          items,
+                                          cueData,
+                                          -1,
+                                        );
+                                      } else if (velocity < -220) {
+                                        _moveByStep(
+                                          firestore,
+                                          canEdit,
+                                          items,
+                                          cueData,
+                                          1,
+                                        );
+                                      }
+                                    },
                               child: FutureBuilder<_LiveCueAssetPreview?>(
                                 future: _loadPreviewCached(
                                   firestore,
@@ -2103,15 +2301,18 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                   currentTitle,
                                 ),
                                 builder: (context, previewSnapshot) {
+                                  final preview =
+                                      previewSnapshot.data ??
+                                      cachedCurrentPreview;
                                   if (previewSnapshot.connectionState ==
-                                      ConnectionState.waiting) {
+                                          ConnectionState.waiting &&
+                                      preview == null) {
                                     return const Center(
                                       child: CircularProgressIndicator(
                                         color: Colors.white,
                                       ),
                                     );
                                   }
-                                  final preview = previewSnapshot.data;
                                   final songIdForDetail =
                                       preview?.resolvedSongId ?? currentSongId;
                                   if (preview == null) {
@@ -2221,8 +2422,13 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                   }
                                   return LayoutBuilder(
                                     builder: (context, constraints) {
+                                      final normalizedViewerKey =
+                                          (currentKey == null ||
+                                              currentKey.trim().isEmpty)
+                                          ? '-'
+                                          : normalizeKeyText(currentKey);
                                       final viewerAssetKey =
-                                          '${preview.storagePath}|$currentLabel|$currentKey';
+                                          '${preview.storagePath}|$normalizedViewerKey';
                                       _ensureViewerAssetKey(viewerAssetKey);
                                       Widget buildScoreLoadError() {
                                         return Center(
@@ -2286,6 +2492,42 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                       }
 
                                       final bytes = preview.initialBytes;
+                                      _syncImageRendererKey(viewerAssetKey);
+                                      final shouldUseHtmlStrategy =
+                                          kIsWeb &&
+                                          _fallbackToHtmlImageElement &&
+                                          !_drawingEnabled;
+                                      final htmlImageStrategy =
+                                          shouldUseHtmlStrategy
+                                          ? WebHtmlElementStrategy.prefer
+                                          : WebHtmlElementStrategy.never;
+
+                                      Widget buildImageLoadError(Object error) {
+                                        if (kIsWeb &&
+                                            bytes == null &&
+                                            !_drawingEnabled &&
+                                            !_fallbackToHtmlImageElement &&
+                                            !_switchingImageRenderer) {
+                                          _switchingImageRenderer = true;
+                                          WidgetsBinding.instance
+                                              .addPostFrameCallback((_) {
+                                                if (!mounted) return;
+                                                setState(() {
+                                                  _fallbackToHtmlImageElement =
+                                                      true;
+                                                  _switchingImageRenderer =
+                                                      false;
+                                                });
+                                              });
+                                          return const Center(
+                                            child: CircularProgressIndicator(
+                                              color: Colors.white,
+                                            ),
+                                          );
+                                        }
+                                        return buildScoreLoadError();
+                                      }
+
                                       final imageWidget =
                                           bytes != null && bytes.isNotEmpty
                                           ? Image.memory(
@@ -2298,7 +2540,9 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                               gaplessPlayback: true,
                                               errorBuilder:
                                                   (context, error, stack) =>
-                                                      buildScoreLoadError(),
+                                                      buildImageLoadError(
+                                                        error,
+                                                      ),
                                             )
                                           : Image.network(
                                               preview.url,
@@ -2307,6 +2551,9 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                               ),
                                               fit: BoxFit.contain,
                                               filterQuality: FilterQuality.high,
+                                              webHtmlElementStrategy:
+                                                  htmlImageStrategy,
+                                              gaplessPlayback: true,
                                               loadingBuilder:
                                                   (
                                                     context,
@@ -2326,7 +2573,9 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                                   },
                                               errorBuilder:
                                                   (context, error, stack) =>
-                                                      buildScoreLoadError(),
+                                                      buildImageLoadError(
+                                                        error,
+                                                      ),
                                             );
                                       final renderStrokes =
                                           _overlayStrokesForRender();
@@ -2334,97 +2583,138 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                         constraints.maxWidth,
                                         constraints.maxHeight,
                                       );
-                                      return Center(
-                                        child: InteractiveViewer(
-                                          transformationController:
-                                              _viewerController,
-                                          minScale: 0.7,
-                                          maxScale: 8,
-                                          panEnabled: !_drawingEnabled,
-                                          scaleEnabled: !_drawingEnabled,
-                                          boundaryMargin: const EdgeInsets.all(
-                                            320,
-                                          ),
-                                          clipBehavior: Clip.none,
-                                          child: SizedBox(
-                                            width: constraints.maxWidth,
-                                            height: constraints.maxHeight,
-                                            child: Stack(
-                                              fit: StackFit.expand,
-                                              children: [
-                                                RepaintBoundary(
-                                                  child: imageWidget,
+                                      final viewerContent = SizedBox(
+                                        width: constraints.maxWidth,
+                                        height: constraints.maxHeight,
+                                        child: Stack(
+                                          fit: StackFit.expand,
+                                          children: [
+                                            RepaintBoundary(child: imageWidget),
+                                            if (renderStrokes.isNotEmpty)
+                                              IgnorePointer(
+                                                child: RepaintBoundary(
+                                                  child: CustomPaint(
+                                                    painter:
+                                                        _LiveCueSketchPainter(
+                                                          strokes:
+                                                              renderStrokes,
+                                                          repaint:
+                                                              _strokeRevision,
+                                                        ),
+                                                  ),
                                                 ),
-                                                if (renderStrokes.isNotEmpty)
-                                                  IgnorePointer(
-                                                    child: RepaintBoundary(
-                                                      child: CustomPaint(
-                                                        painter:
-                                                            _LiveCueSketchPainter(
-                                                              strokes:
-                                                                  renderStrokes,
-                                                              repaint:
-                                                                  _strokeRevision,
-                                                            ),
+                                              ),
+                                            if (_drawingEnabled && canEdit)
+                                              GestureDetector(
+                                                behavior:
+                                                    HitTestBehavior.opaque,
+                                                onTapDown: (details) {
+                                                  if (_eraserEnabled) {
+                                                    _eraseLayerAt(
+                                                      details.localPosition,
+                                                      canvasSize,
+                                                    );
+                                                    return;
+                                                  }
+                                                  _tapLayerStroke(
+                                                    details,
+                                                    canvasSize,
+                                                  );
+                                                },
+                                                onPanStart: (details) {
+                                                  if (_eraserEnabled) {
+                                                    _eraseLayerAt(
+                                                      details.localPosition,
+                                                      canvasSize,
+                                                    );
+                                                    return;
+                                                  }
+                                                  _startLayerStroke(
+                                                    details,
+                                                    canvasSize,
+                                                  );
+                                                },
+                                                onPanUpdate: (details) {
+                                                  if (_eraserEnabled) {
+                                                    _eraseLayerAt(
+                                                      details.localPosition,
+                                                      canvasSize,
+                                                    );
+                                                    return;
+                                                  }
+                                                  _appendLayerStroke(
+                                                    details,
+                                                    canvasSize,
+                                                  );
+                                                },
+                                                onPanEnd: (_) {
+                                                  if (!_eraserEnabled) {
+                                                    _endLayerStroke();
+                                                  }
+                                                },
+                                                onPanCancel: () {
+                                                  if (!_eraserEnabled) {
+                                                    _endLayerStroke();
+                                                  }
+                                                },
+                                              ),
+                                          ],
+                                        ),
+                                      );
+                                      final viewWidget =
+                                          _drawingEnabled && canEdit
+                                          ? viewerContent
+                                          : InteractiveViewer(
+                                              transformationController:
+                                                  _viewerController,
+                                              minScale: 0.7,
+                                              maxScale: 8,
+                                              panEnabled: true,
+                                              scaleEnabled: true,
+                                              boundaryMargin:
+                                                  const EdgeInsets.all(320),
+                                              clipBehavior: Clip.none,
+                                              child: viewerContent,
+                                            );
+
+                                      return Center(
+                                        child: SizedBox(
+                                          width: constraints.maxWidth,
+                                          height: constraints.maxHeight,
+                                          child: Stack(
+                                            fit: StackFit.expand,
+                                            children: [
+                                              viewWidget,
+                                              if (kIsWeb &&
+                                                  _fallbackToHtmlImageElement &&
+                                                  _drawingEnabled &&
+                                                  canEdit)
+                                                Positioned(
+                                                  left: 16,
+                                                  right: 16,
+                                                  top: 12,
+                                                  child: Container(
+                                                    padding:
+                                                        const EdgeInsets.all(8),
+                                                    decoration: BoxDecoration(
+                                                      color: Colors.black87,
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            8,
+                                                          ),
+                                                    ),
+                                                    child: const Text(
+                                                      '브라우저 렌더링 호환 모드(prefer)로 전환되어 필기 입력이 불안정할 수 있습니다.',
+                                                      textAlign:
+                                                          TextAlign.center,
+                                                      style: TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 12,
                                                       ),
                                                     ),
                                                   ),
-                                                if (_drawingEnabled && canEdit)
-                                                  GestureDetector(
-                                                    behavior:
-                                                        HitTestBehavior.opaque,
-                                                    onTapDown: (details) {
-                                                      if (_eraserEnabled) {
-                                                        _eraseLayerAt(
-                                                          details.localPosition,
-                                                          canvasSize,
-                                                        );
-                                                        return;
-                                                      }
-                                                      _tapLayerStroke(
-                                                        details,
-                                                        canvasSize,
-                                                      );
-                                                    },
-                                                    onPanStart: (details) {
-                                                      if (_eraserEnabled) {
-                                                        _eraseLayerAt(
-                                                          details.localPosition,
-                                                          canvasSize,
-                                                        );
-                                                        return;
-                                                      }
-                                                      _startLayerStroke(
-                                                        details,
-                                                        canvasSize,
-                                                      );
-                                                    },
-                                                    onPanUpdate: (details) {
-                                                      if (_eraserEnabled) {
-                                                        _eraseLayerAt(
-                                                          details.localPosition,
-                                                          canvasSize,
-                                                        );
-                                                        return;
-                                                      }
-                                                      _appendLayerStroke(
-                                                        details,
-                                                        canvasSize,
-                                                      );
-                                                    },
-                                                    onPanEnd: (_) {
-                                                      if (!_eraserEnabled) {
-                                                        _endLayerStroke();
-                                                      }
-                                                    },
-                                                    onPanCancel: () {
-                                                      if (!_eraserEnabled) {
-                                                        _endLayerStroke();
-                                                      }
-                                                    },
-                                                  ),
-                                              ],
-                                            ),
+                                                ),
+                                            ],
                                           ),
                                         ),
                                       );
@@ -2932,7 +3222,8 @@ class _LiveCueNotePayload {
   final String text;
   final List<_LiveCueSketchStroke> strokes;
 
-  const _LiveCueNotePayload({this.text = '', this.strokes = const []});
+  _LiveCueNotePayload({this.text = '', List<_LiveCueSketchStroke>? strokes})
+    : strokes = strokes ?? <_LiveCueSketchStroke>[];
 
   factory _LiveCueNotePayload.fromMap(Map<String, dynamic> data) {
     return _LiveCueNotePayload(
@@ -2969,7 +3260,7 @@ class _LiveCueSketchStroke {
   }
 
   static List<_LiveCueSketchStroke> decodeList(dynamic raw) {
-    if (raw is! List) return const [];
+    if (raw is! List) return <_LiveCueSketchStroke>[];
     final decoded = <_LiveCueSketchStroke>[];
     for (final item in raw) {
       if (item is! Map) continue;

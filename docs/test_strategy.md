@@ -24,6 +24,12 @@
 - Invite accept and role visibility
 - Song asset upload metadata path
 - Live cue open and asset resolve flow
+- Live cue keyboard/swipe transition flow
+
+Limitations:
+- `test/integration/live_cue_web_e2e_test.dart` uses fake/mocked dependencies.
+- Browser real-path issues (Firestore transport/CORS/image renderer fallback/pointer events)
+  are not fully covered by mocked integration tests.
 
 ## 3. Self-Healing Regression Scenarios (Required)
 The following scenarios must be covered explicitly.
@@ -45,17 +51,33 @@ The following scenarios must be covered explicitly.
 - Expected: invalid entries ignored and UI remains functional
 
 ## 4. Coverage Policy
-- Minimum coverage threshold controlled by `COVERAGE_MIN` (default 35).
+- Minimum coverage threshold controlled by:
+  - `COVERAGE_MIN` (explicit value, highest priority)
+  - `COVERAGE_STAGE` (stage preset): `baseline=35`, `step50=50`, `step60=60`
 - CI must execute:
   - `flutter analyze`
   - `flutter test --coverage`
   - `scripts/ci/check_coverage.sh`
   - `flutter build web --release`
 - Any failure blocks deployment.
+- `scripts/ci/check_coverage.sh` applies temporary exclusion regex by default for high-interaction screens:
+  - `lib/features/projects/live_cue_page.dart`
+  - `lib/features/projects/segment_a_page.dart`
+  - `lib/features/projects/segment_b_page.dart`
+  - `lib/features/teams/team_home_page.dart`
+  - `lib/features/teams/team_invite_panel.dart`
+- Override policy:
+  - `COVERAGE_EXCLUDE_REGEX=""` to disable exclusions and measure full scope.
+  - `COVERAGE_EXCLUDE_REGEX="<regex>"` to set custom exclusion scope.
+- Reporting policy (required):
+  - Excluded scope gate: `scripts/ci/check_coverage.sh` (current threshold 35%)
+  - Raw scope report: `COVERAGE_EXCLUDE_REGEX="" scripts/ci/check_coverage.sh`
+  - Release notes must include both values (`excluded` + `raw`)
 
 ## 5. Runner Dependency Policy
 - `lcov` install attempted in CI.
 - If `lcov` unavailable, parse `coverage/lcov.info` directly.
+- Firestore Rules emulator suite(`scripts/ci/test_rules.sh`) requires Java 17+.
 
 ## 6. Manual Alpha Checklist (pre-beta)
 - Team create/delete
@@ -63,6 +85,9 @@ The following scenarios must be covered explicitly.
 - Invite link open/accept
 - Song upload/open in live cue
 - Notes draw/erase/save
+- LiveCue Safari matrix required:
+  - execute `docs/livecue_repro_matrix.md` LC-SAF-01~06
+  - release approval requires LC-SAF-01/04/05 pass evidence
 
 ## 7. Exit Criteria
 - Critical self-healing scenarios pass.

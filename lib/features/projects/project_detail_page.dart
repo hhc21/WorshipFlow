@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
+import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
 import 'live_cue_page.dart';
 import 'segment_a_page.dart';
@@ -186,12 +187,7 @@ class ProjectDetailPage extends ConsumerWidget {
         final leaderId = projectData['leaderUserId']?.toString();
         final isLeader = leaderId == user.uid;
         final role = contextData.member.data()?['role']?.toString();
-        final normalizedRole = (role ?? '').trim().toLowerCase();
-        final isAdmin =
-            normalizedRole == 'admin' ||
-            normalizedRole == 'owner' ||
-            normalizedRole == 'team_admin' ||
-            normalizedRole == '팀장';
+        final isAdmin = isAdminRole(role);
         final canEdit = isLeader || isAdmin;
         final roleLabel = isAdmin ? '팀장' : (isLeader ? '인도자' : '팀원');
 

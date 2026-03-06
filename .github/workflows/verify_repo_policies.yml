@@ -1,0 +1,35 @@
+name: verify-repo-policies
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 18 * * 0" # KST Monday 03:15
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.REPO_ADMIN_TOKEN != '' }}
+    env:
+      GH_TOKEN: ${{ secrets.REPO_ADMIN_TOKEN }}
+      GITHUB_OWNER: hhc21
+      GITHUB_REPO: WorshipFlow
+      GITHUB_BRANCH: main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify repository policies
+        run: |
+          chmod +x scripts/github/verify_repo_policies.sh
+          scripts/github/verify_repo_policies.sh
+
+  verify-skipped:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.REPO_ADMIN_TOKEN == '' }}
+    steps:
+      - name: Missing token notice
+        run: |
+          echo "::warning::Skipping policy verification. Set repository secret REPO_ADMIN_TOKEN to enable this workflow."
