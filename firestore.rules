@@ -122,6 +122,10 @@ service cloud.firestore {
       return role == 'member' || role == 'leader' || role == 'speaker' || role == 'admin';
     }
 
+    function isValidJoinRequestStatus(status) {
+      return status == 'pending' || status == 'invited' || status == 'rejected' || status == 'cancelled';
+    }
+
     function memberDocBelongsToRequester(memberData) {
       return isSignedIn()
         && (
@@ -295,6 +299,42 @@ service cloud.firestore {
         allow delete: if isTeamAdmin(teamId);
       }
 
+      match /joinRequests/{requesterUid} {
+        allow get: if isTeamAdmin(teamId)
+          || (isSignedIn() && request.auth.uid == requesterUid);
+        allow list: if isTeamAdmin(teamId);
+        allow create: if isSignedIn()
+          && request.auth.uid == requesterUid
+          && !isTeamMember(teamId)
+          && userEmail() != null
+          && request.resource.data.requesterUid == request.auth.uid
+          && request.resource.data.requesterEmail is string
+          && request.resource.data.requesterEmail == userEmail()
+          && request.resource.data.teamId == teamId
+          && request.resource.data.teamName is string
+          && request.resource.data.teamName.size() > 0
+          && request.resource.data.status == 'pending';
+        allow update: if (
+            isTeamAdmin(teamId)
+            && request.resource.data.requesterUid == resource.data.requesterUid
+            && request.resource.data.requesterEmail == resource.data.requesterEmail
+            && request.resource.data.teamId == resource.data.teamId
+            && request.resource.data.teamName == resource.data.teamName
+            && isValidJoinRequestStatus(request.resource.data.status)
+          )
+          || (
+            isSignedIn()
+            && request.auth.uid == requesterUid
+            && request.resource.data.requesterUid == resource.data.requesterUid
+            && request.resource.data.requesterEmail == resource.data.requesterEmail
+            && request.resource.data.teamId == resource.data.teamId
+            && request.resource.data.teamName == resource.data.teamName
+            && request.resource.data.status == 'pending'
+          );
+        allow delete: if isTeamAdmin(teamId)
+          || (isSignedIn() && request.auth.uid == requesterUid);
+      }
+
       match /invites/{inviteId} {
         // Query-friendly list rule for collectionGroup('invites')
         allow list: if isTeamAdmin(teamId)
@@ -342,6 +382,35 @@ service cloud.firestore {
           && request.resource.data.status == 'active'
           && request.resource.data.createdBy == request.auth.uid;
         allow update, delete: if isTeamAdmin(teamId);
+      }
+
+      match /opsMetrics/{metricId} {
+        allow create: if isTeamMember(teamId)
+          && request.resource.data.category is string
+          && request.resource.data.action is string
+          && request.resource.data.status is string;
+        allow get, list: if isTeamAdmin(teamId);
+        allow update, delete: if false;
+      }
+
+      match /deleteQueue/{requestId} {
+        allow create: if isTeamAdmin(teamId)
+          && request.resource.data.teamId == teamId
+          && request.resource.data.requestedBy == request.auth.uid
+          && request.resource.data.status == 'queued'
+          && (
+            (
+              request.resource.data.type == 'teamDelete'
+              && (!('projectId' in request.resource.data) || request.resource.data.projectId == null)
+            )
+            || (
+              request.resource.data.type == 'projectDelete'
+              && request.resource.data.projectId is string
+              && request.resource.data.projectId.size() > 0
+            )
+          );
+        allow get, list: if isTeamAdmin(teamId);
+        allow update, delete: if false;
       }
 
       // Team references to global songs (any team member can add)

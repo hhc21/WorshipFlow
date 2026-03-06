@@ -81,9 +81,14 @@
     });
   </script>
   <script>
-    // Avoid stale bundles from older Flutter service workers during active development.
+    // Clear stale service workers only in local dev (or explicit override),
+    // to avoid first-load reload flicker in live environments.
     (function () {
       if (!('serviceWorker' in navigator)) return;
+      var host = window.location.hostname || '';
+      var isLocalhost = host === 'localhost' || host === '127.0.0.1';
+      var forceClear = new URLSearchParams(window.location.search).get('wf_sw_clear') === '1';
+      if (!isLocalhost && !forceClear) return;
       navigator.serviceWorker.getRegistrations().then(function (registrations) {
         if (!registrations || registrations.length === 0) return;
         return Promise.all(registrations.map(function (reg) { return reg.unregister(); }))

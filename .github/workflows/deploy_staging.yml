@@ -2,26 +2,45 @@ name: deploy-staging
 
 on:
   workflow_dispatch:
-  push:
+  workflow_run:
+    workflows:
+      - ci
+    types:
+      - completed
     branches:
       - main
+
+concurrency:
+  group: deploy-staging-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   preflight:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     env:
       COVERAGE_MIN: ${{ vars.COVERAGE_MIN }}
+      COVERAGE_STAGE: ${{ vars.COVERAGE_STAGE }}
+      WF_FIRESTORE_TRANSPORT: long-polling
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Verify storage CORS policy file
+        run: |
+          chmod +x scripts/ci/verify_storage_cors_policy.sh
+          scripts/ci/verify_storage_cors_policy.sh
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
 
       - name: Flutter pub get
         run: flutter pub get
@@ -42,8 +61,45 @@ jobs:
           chmod +x scripts/ci/check_coverage.sh
           scripts/ci/check_coverage.sh
 
+      - name: Verify LiveCue Safari smoke gate
+        env:
+          LIVECUE_SAFARI_SMOKE_RESULT: ${{ vars.LIVECUE_SAFARI_SMOKE_RESULT }}
+          LIVECUE_SAFARI_SMOKE_EVIDENCE: ${{ vars.LIVECUE_SAFARI_SMOKE_EVIDENCE }}
+        run: |
+          chmod +x scripts/ci/verify_livecue_safari_gate.sh
+          scripts/ci/verify_livecue_safari_gate.sh required
+
       - name: Build web release
-        run: flutter build web --release
+        run: |
+          flutter build web --release --dart-define=WF_FIRESTORE_TRANSPORT=${WF_FIRESTORE_TRANSPORT}
+          chmod +x scripts/ci/ensure_flutter_sourcemap_stub.sh
+          scripts/ci/ensure_flutter_sourcemap_stub.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Setup Java (Firestore emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Firestore rules self-healing suite
+        run: |
+          chmod +x scripts/ci/test_rules.sh
+          scripts/ci/test_rules.sh
+
+      - name: Upload web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-build-staging
+          path: build/web
 
   deploy:
     runs-on: ubuntu-latest
@@ -52,19 +108,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
+
+      - name: Download web artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build-staging
+          path: build/web
 
       - name: Setup Firebase auth
         shell: bash
@@ -83,12 +143,6 @@ jobs:
             echo "::error::Missing Firebase auth secret. Set FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_TOKEN."
             exit 1
           fi
-
-      - name: Flutter pub get
-        run: flutter pub get
-
-      - name: Build web release
-        run: flutter build web --release
 
       - name: Deploy to Firebase (staging)
         shell: bash
@@ -112,4 +166,3 @@ jobs:
               --project "$FIREBASE_PROJECT_ID" \
               --only hosting,firestore:rules,storage
           fi
-

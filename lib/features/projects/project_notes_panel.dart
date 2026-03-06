@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../services/firebase_providers.dart';
+import '../../services/ops_metrics.dart';
+import '../../utils/firestore_id.dart';
 
 class ProjectNotesPanel extends ConsumerStatefulWidget {
   final String teamId;
@@ -22,14 +26,6 @@ class _ProjectNotesPanelState extends ConsumerState<ProjectNotesPanel> {
   bool _openingPrivate = false;
   bool _openingShared = false;
 
-  String _privateNoteDocIdV2(String userId) {
-    return 'v2__${widget.projectId}__$userId';
-  }
-
-  String _privateNoteDocIdLegacy(String userId) {
-    return '${widget.projectId}__$userId';
-  }
-
   Future<_NotePayload> _loadPrivatePayload(
     FirebaseFirestore firestore,
     String userId,
@@ -38,7 +34,7 @@ class _ProjectNotesPanelState extends ConsumerState<ProjectNotesPanel> {
         .collection('teams')
         .doc(widget.teamId)
         .collection('userProjectNotes')
-        .doc(_privateNoteDocIdV2(userId));
+        .doc(privateProjectNoteDocIdV2(widget.projectId, userId));
     final doc = await v2DocRef.get();
 
     final data = doc.data();
@@ -51,10 +47,18 @@ class _ProjectNotesPanelState extends ConsumerState<ProjectNotesPanel> {
         .collection('teams')
         .doc(widget.teamId)
         .collection('userProjectNotes')
-        .doc(_privateNoteDocIdLegacy(userId))
+        .doc(privateProjectNoteDocIdLegacy(widget.projectId, userId))
         .get();
     final legacyDocData = legacyDoc.data();
     if (legacyDocData != null) {
+      unawaited(
+        logLegacyFallbackUsage(
+          firestore: firestore,
+          teamId: widget.teamId,
+          path: 'project_notes.legacy_doc_id',
+          detail: widget.projectId,
+        ),
+      );
       final merged = {
         ...legacyDocData,
         'visibility': 'private',
@@ -80,7 +84,15 @@ class _ProjectNotesPanelState extends ConsumerState<ProjectNotesPanel> {
         .where('projectId', isEqualTo: widget.projectId)
         .limit(1)
         .get();
-    if (legacyQuery.docs.isEmpty) return const _NotePayload();
+    if (legacyQuery.docs.isEmpty) return _NotePayload();
+    unawaited(
+      logLegacyFallbackUsage(
+        firestore: firestore,
+        teamId: widget.teamId,
+        path: 'project_notes.legacy_query',
+        detail: widget.projectId,
+      ),
+    );
     final legacyData = legacyQuery.docs.first.data();
     final merged = {
       ...legacyData,
@@ -108,7 +120,7 @@ class _ProjectNotesPanelState extends ConsumerState<ProjectNotesPanel> {
         .doc('main')
         .get();
     final data = doc.data();
-    if (data == null) return const _NotePayload();
+    if (data == null) return _NotePayload();
     return _NotePayload.fromMap(data);
   }
 
@@ -134,7 +146,7 @@ class _ProjectNotesPanelState extends ConsumerState<ProjectNotesPanel> {
         .collection('teams')
         .doc(widget.teamId)
         .collection('userProjectNotes')
-        .doc(_privateNoteDocIdV2(userId))
+        .doc(privateProjectNoteDocIdV2(widget.projectId, userId))
         .set(data, SetOptions(merge: true));
 
     if (mounted) {
@@ -567,7 +579,8 @@ class _NotePayload {
   final String text;
   final List<_SketchStroke> strokes;
 
-  const _NotePayload({this.text = '', this.strokes = const []});
+  _NotePayload({this.text = '', List<_SketchStroke>? strokes})
+    : strokes = strokes ?? <_SketchStroke>[];
 
   factory _NotePayload.fromMap(Map<String, dynamic> data) {
     return _NotePayload(
@@ -581,7 +594,7 @@ class _NotePayload {
   }
 
   static List<_SketchStroke> _decodeStrokes(dynamic raw) {
-    if (raw is! List) return const [];
+    if (raw is! List) return <_SketchStroke>[];
     final decoded = <_SketchStroke>[];
     for (final item in raw) {
       if (item is! Map) continue;

@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
+import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
 import '../../utils/firestore_id.dart';
 import '../../utils/team_name.dart';
@@ -289,6 +290,81 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     });
   }
 
+  Future<_JoinRequestOutcome> _requestJoinForExistingTeam({
+    required FirebaseFirestore firestore,
+    required User user,
+    required String teamId,
+    required String fallbackTeamName,
+    required String teamNameKey,
+  }) async {
+    final email = user.email?.toLowerCase().trim() ?? '';
+    if (email.isEmpty) {
+      return _JoinRequestOutcome.requiresEmail;
+    }
+    if (!isValidFirestoreDocId(teamId)) {
+      return _JoinRequestOutcome.unavailable;
+    }
+
+    final teamRef = firestore.collection('teams').doc(teamId);
+    final teamSnapshot = await teamRef.get().timeout(
+      const Duration(seconds: 10),
+    );
+    if (!teamSnapshot.exists) {
+      return _JoinRequestOutcome.unavailable;
+    }
+
+    final teamData = teamSnapshot.data() ?? const <String, dynamic>{};
+    final teamName = (teamData['name'] ?? fallbackTeamName).toString().trim();
+    final memberUidsRaw = teamData['memberUids'];
+    final memberUids = memberUidsRaw is List
+        ? memberUidsRaw.map((value) => value.toString()).toList()
+        : const <String>[];
+    if (memberUids.contains(user.uid)) {
+      return _JoinRequestOutcome.alreadyMember;
+    }
+
+    final memberDoc = await teamRef
+        .collection('members')
+        .doc(user.uid)
+        .get()
+        .timeout(const Duration(seconds: 10));
+    if (memberDoc.exists) {
+      return _JoinRequestOutcome.alreadyMember;
+    }
+
+    final requestRef = teamRef.collection('joinRequests').doc(user.uid);
+    final existingRequest = await requestRef.get().timeout(
+      const Duration(seconds: 10),
+    );
+    if (existingRequest.exists) {
+      final status = (existingRequest.data()?['status'] ?? '')
+          .toString()
+          .trim();
+      if (status == 'pending' || status == 'invited') {
+        return _JoinRequestOutcome.alreadyRequested;
+      }
+    }
+
+    final nickname = await _resolveOwnNickname(firestore, user).timeout(
+      const Duration(seconds: 8),
+      onTimeout: () => _fallbackUserName(user),
+    );
+    await requestRef.set({
+      'requesterUid': user.uid,
+      'requesterEmail': email,
+      'requesterDisplayName': user.displayName,
+      'requesterNickname': nickname,
+      'teamId': teamId,
+      'teamName': teamName.isEmpty ? fallbackTeamName : teamName,
+      'teamNameKey': teamNameKey,
+      'source': 'duplicate_team_name',
+      'status': 'pending',
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    return _JoinRequestOutcome.submitted;
+  }
+
   Future<void> _createTeam(BuildContext context) async {
     if (_creating) return;
     final rawName = _teamNameController.text;
@@ -375,7 +451,49 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         }
       }
       if (existingName.exists) {
-        throw const _TeamNameAlreadyExistsException();
+        final existingData = existingName.data() ?? const <String, dynamic>{};
+        final indexedTeamId = (existingData['teamId'] ?? '').toString().trim();
+        final outcome = await _requestJoinForExistingTeam(
+          firestore: firestore,
+          user: user,
+          teamId: indexedTeamId,
+          fallbackTeamName: name,
+          teamNameKey: teamNameKey,
+        );
+        if (!context.mounted) return;
+        switch (outcome) {
+          case _JoinRequestOutcome.submitted:
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  '동일 이름 팀이 이미 있어 팀장에게 초대 요청을 보냈습니다. 받은 초대를 수락해 주세요.',
+                ),
+              ),
+            );
+            return;
+          case _JoinRequestOutcome.alreadyRequested:
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('이미 초대 요청을 보냈습니다. 팀장의 초대를 기다려 주세요.'),
+              ),
+            );
+            return;
+          case _JoinRequestOutcome.alreadyMember:
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('이미 해당 팀에 참여 중입니다. 내 팀 목록에서 기존 팀을 선택해 주세요.'),
+              ),
+            );
+            _refreshMembershipData();
+            return;
+          case _JoinRequestOutcome.requiresEmail:
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('초대 요청을 보내려면 이메일 계정으로 로그인해 주세요.')),
+            );
+            return;
+          case _JoinRequestOutcome.unavailable:
+            throw const _TeamNameAlreadyExistsException();
+        }
       }
 
       try {
@@ -516,7 +634,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
             teamName: (data['teamName'] ?? '팀').toString().trim().isEmpty
                 ? '팀'
                 : (data['teamName'] ?? '팀').toString().trim(),
-            role: _roleKey((data['role'] ?? 'member').toString()),
+            role: teamRoleKey((data['role'] ?? 'member').toString()),
             lastProjectId: (data['lastProjectId'] ?? '').toString().trim(),
           );
         }
@@ -635,7 +753,9 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         final teamId = doc.reference.parent.parent?.id ?? '';
         if (!isValidFirestoreDocId(teamId)) continue;
 
-        final normalizedRole = _roleKey((data['role'] ?? 'member').toString());
+        final normalizedRole = teamRoleKey(
+          (data['role'] ?? 'member').toString(),
+        );
         final fallbackName = (data['teamName'] ?? '팀').toString().trim();
         final existing = byTeamId[teamId];
         byTeamId[teamId] = _TeamMembership(
@@ -724,7 +844,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
             final memberData = memberDoc.data() ?? const <String, dynamic>{};
             final role = memberData['role']?.toString().trim();
             if (role != null && role.isNotEmpty) {
-              nextRole = _roleKey(role);
+              nextRole = teamRoleKey(role);
             }
 
             final needsBackfillUserId = (memberData['userId'] ?? '')
@@ -955,7 +1075,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       }
       final resolvedTeamName = (inviteData['teamName'] ?? invite.teamName)
           .toString();
-      final resolvedRole = _roleKey(
+      final resolvedRole = teamRoleKey(
         (inviteData['role'] ?? invite.role).toString(),
       );
       await memberRef.set({
@@ -1091,7 +1211,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       }
       final resolvedTeamName = (inviteLinkData['teamName'] ?? invite.teamName)
           .toString();
-      final resolvedRole = _roleKey(
+      final resolvedRole = teamRoleKey(
         (inviteLinkData['role'] ?? invite.role).toString(),
       );
       await memberRef.set({
@@ -1148,48 +1268,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     setState(() => _tabIndex = index);
   }
 
-  Future<void> _removeTeamFromList(
-    BuildContext context,
-    _TeamMembership team,
-  ) async {
-    final firestore = ref.read(firestoreProvider);
-    final user = ref.read(firebaseAuthProvider).currentUser;
-    if (user == null) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('팀 목록에서 제거'),
-        content: Text(
-          '"${team.teamName}" 항목을 내 목록에서 제거합니다.\n'
-          '실제 팀이 이미 삭제된 경우 정리에 사용하세요.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('취소'),
-          ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('제거'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-
-    await _deleteUserTeamMembershipMirror(
-      firestore: firestore,
-      uid: user.uid,
-      teamId: team.teamId,
-    );
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('팀 목록 항목을 제거했습니다.')));
-    _refreshMembershipData();
-  }
-
   DocumentReference<Map<String, dynamic>> _userTeamMembershipRef({
     required FirebaseFirestore firestore,
     required String uid,
@@ -1229,7 +1307,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         fetchInvites: _fetchInvitesCached,
         acceptInvite: _acceptInvite,
         fetchTeams: _fetchTeamsCached,
-        onRemoveTeamFromList: _removeTeamFromList,
         teamNameController: _teamNameController,
         creating: _creating,
         onCreateTeam: _createTeam,
@@ -1412,8 +1489,6 @@ class _TeamsTab extends StatelessWidget {
   final Future<void> Function(BuildContext context, _InviteInfo invite)
   acceptInvite;
   final Future<List<_TeamMembership>> Function(String uid) fetchTeams;
-  final Future<void> Function(BuildContext context, _TeamMembership team)
-  onRemoveTeamFromList;
   final TextEditingController teamNameController;
   final bool creating;
   final Future<void> Function(BuildContext context) onCreateTeam;
@@ -1431,7 +1506,6 @@ class _TeamsTab extends StatelessWidget {
     required this.fetchInvites,
     required this.acceptInvite,
     required this.fetchTeams,
-    required this.onRemoveTeamFromList,
     required this.teamNameController,
     required this.creating,
     required this.onCreateTeam,
@@ -1469,11 +1543,10 @@ class _TeamsTab extends StatelessWidget {
 
   Color _roleColor(BuildContext context, String role) {
     final scheme = Theme.of(context).colorScheme;
-    switch (role) {
+    switch (teamRoleKey(role)) {
       case 'admin':
         return scheme.primary;
       case 'leader':
-      case 'speaker':
         return scheme.tertiary;
       case 'member':
       default:
@@ -1514,7 +1587,7 @@ class _TeamsTab extends StatelessWidget {
               return AppSectionCard(
                 icon: Icons.link_rounded,
                 title: '${invite.teamName} 링크 초대',
-                subtitle: '역할: ${_roleLabel(invite.role)}',
+                subtitle: '역할: ${teamRoleLabel(invite.role)}',
                 trailing: FilledButton(
                   onPressed: () => acceptInviteLink(context, invite),
                   child: const Text('바로 참여'),
@@ -1603,8 +1676,7 @@ class _TeamsTab extends StatelessWidget {
                     runSpacing: 6,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Text('팀 ID: ${team.teamId}'),
-                      Text('역할: ${_roleLabel(team.role)}'),
+                      Text('역할: ${teamRoleLabel(team.role)}'),
                       if (lastProjectId != null && lastProjectId.isNotEmpty)
                         Text('최근 프로젝트: $lastProjectId'),
                       if (hasDuplicateName)
@@ -1638,7 +1710,7 @@ class _TeamsTab extends StatelessWidget {
                           borderRadius: BorderRadius.circular(999),
                         ),
                         child: Text(
-                          _roleLabel(team.role),
+                          teamRoleLabel(team.role),
                           style: TextStyle(
                             color: roleColor,
                             fontWeight: FontWeight.w700,
@@ -1647,26 +1719,7 @@ class _TeamsTab extends StatelessWidget {
                       ),
                     ],
                   ),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      PopupMenuButton<String>(
-                        tooltip: '팀 항목 메뉴',
-                        onSelected: (value) {
-                          if (value == 'remove_from_list') {
-                            onRemoveTeamFromList(context, team);
-                          }
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
-                            value: 'remove_from_list',
-                            child: Text('목록에서 제거(유령 팀 정리)'),
-                          ),
-                        ],
-                      ),
-                      const Icon(Icons.chevron_right),
-                    ],
-                  ),
+                  trailing: const Icon(Icons.chevron_right),
                   onTap: () => context.go('/teams/${team.teamId}'),
                 ),
               );
@@ -1728,7 +1781,9 @@ class _TeamsTab extends StatelessWidget {
                                 child: const Icon(Icons.mail, size: 16),
                               ),
                               title: Text(invite.teamName),
-                              subtitle: Text('역할: ${_roleLabel(invite.role)}'),
+                              subtitle: Text(
+                                '역할: ${teamRoleLabel(invite.role)}',
+                              ),
                               trailing: FilledButton.tonal(
                                 onPressed: () => acceptInvite(context, invite),
                                 child: const Text('수락'),
@@ -1768,7 +1823,7 @@ class _TeamsTab extends StatelessWidget {
         decoration: appInputDecoration(
           context,
           label: '팀 이름',
-          helper: '팀 생성 후 팀 내부에서 프로젝트(예배 날짜)를 생성합니다.',
+          helper: '동일 팀명이 있으면 새 팀 대신 팀장에게 초대 요청이 전송됩니다.',
         ),
       ),
     );
@@ -1973,6 +2028,14 @@ class _InviteLinkInfo {
   });
 }
 
+enum _JoinRequestOutcome {
+  submitted,
+  alreadyRequested,
+  alreadyMember,
+  requiresEmail,
+  unavailable,
+}
+
 class _TeamNameAlreadyExistsException implements Exception {
   const _TeamNameAlreadyExistsException();
 }
@@ -1983,32 +2046,6 @@ class _InvalidTeamNameException implements Exception {
 
 class _TeamNameCheckUnavailableException implements Exception {
   const _TeamNameCheckUnavailableException();
-}
-
-String _roleLabel(String role) {
-  switch (role) {
-    case 'admin':
-      return '팀장';
-    case 'leader':
-    case 'speaker':
-      return '인도자';
-    case 'member':
-    default:
-      return '팀원';
-  }
-}
-
-String _roleKey(String role) {
-  switch (role.toLowerCase()) {
-    case 'admin':
-      return 'admin';
-    case 'leader':
-    case 'speaker':
-      return 'leader';
-    case 'member':
-    default:
-      return 'member';
-  }
 }
 
 String _friendlyAsyncError(Object? error) {

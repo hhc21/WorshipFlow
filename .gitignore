@@ -45,4 +45,8 @@ app.*.map.json
 /android/app/release
 
 node_modules/
+.tmp/
 .firebase/
+
+# Local Firebase service account credentials
+*-firebase-adminsdk-*.json
