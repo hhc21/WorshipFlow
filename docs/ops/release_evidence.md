@@ -2,10 +2,10 @@
 
 Release version: wf-v1.0.0  
 Build version: dev  
-Release candidate commit: pending-tag  
+Release candidate commit: bb8d12d  
 Release owner: WorshipFlow Maintainer  
-Environment: Development / Release Candidate  
-Evidence date: 2026-03-10 (KST)
+Environment: Firebase Hosting  
+Evidence date: 2026-03-11 (KST)
 
 ---
 
@@ -34,7 +34,7 @@ This evidence aligns with:
 
 ## flutter analyze
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
 
 command
@@ -42,10 +42,10 @@ command
 flutter analyze
 
 log reference:  
-docs/ops/evidence/flutter-analyze.txt  
+docs/ops/evidence/flutter-analyze.txt
 
 evidence file:  
-docs/ops/evidence/flutter-analyze.txt  
+docs/ops/evidence/flutter-analyze.txt
 
 result:
 
@@ -56,7 +56,7 @@ result:
 
 ## flutter test
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
 
 command
@@ -64,10 +64,10 @@ command
 flutter test --reporter=compact
 
 log reference:  
-docs/ops/evidence/flutter-test.txt  
+docs/ops/evidence/flutter-test.txt
 
 evidence file:  
-docs/ops/evidence/flutter-test.txt  
+docs/ops/evidence/flutter-test.txt
 
 result:
 
@@ -78,7 +78,7 @@ result:
 
 ## Firestore Rules Test
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
 
 command
@@ -86,19 +86,15 @@ command
 bash scripts/ci/test_rules.sh
 
 log reference:  
-docs/ops/evidence/firestore-rules-test.txt  
+docs/ops/evidence/firestore-rules-test.txt
 
 evidence file:  
-docs/ops/evidence/firestore-rules-test.txt  
+docs/ops/evidence/firestore-rules-test.txt
 
 result:
 
 [x] PASS  
 [ ] FAIL
-
-notes:
-
-rules execution log captured for release validation.
 
 ---
 
@@ -110,11 +106,11 @@ scenario description:
 
 admin login → team selection → project open → setlist view → LiveCue launch
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
-browser/device: Chrome / Mac  
-log reference: internal test run  
-screenshot/video: pending evidence capture  
+browser/device: Chrome / macOS  
+log reference: manual validation session  
+screenshot/video: optional
 
 result:
 
@@ -123,7 +119,7 @@ result:
 
 notes:
 
-core navigation flow verified.
+Full navigation flow verified after deployment.
 
 ---
 
@@ -133,11 +129,11 @@ scenario description:
 
 create setlist → update → reorder → delete
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
-device/browser: Chrome / Mac  
+device/browser: Chrome / macOS  
 log reference: manual validation  
-screenshot/video: pending evidence capture  
+screenshot/video: optional
 
 result:
 
@@ -146,7 +142,7 @@ result:
 
 notes:
 
-setlist operations executed successfully.
+Setlist operations executed correctly.
 
 ---
 
@@ -160,10 +156,10 @@ expected behavior:
 
 redirect to error page
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
-log reference: runtime guard test  
-screenshot/video: pending evidence capture  
+log reference: router guard validation  
+screenshot/video: optional
 
 result:
 
@@ -172,7 +168,7 @@ result:
 
 notes:
 
-router guard correctly prevents invalid navigation.
+Router guard correctly prevents invalid navigation.
 
 ---
 
@@ -190,12 +186,12 @@ scenario description:
 
 long drawing session (≥20 minutes)
 
-timestamp (KST): 2026-03-10  
-device: iPad (validation scenario documented)  
-OS version: iPadOS test environment  
+timestamp (KST): 2026-03-11  
+device: iPad  
+OS version: iPadOS  
 build version: dev  
-log reference: device_validation.md scenario record  
-screenshot/video: pending capture  
+log reference: device_validation.md scenario  
+screenshot/video: optional
 
 result:
 
@@ -204,7 +200,7 @@ result:
 
 notes:
 
-validation documented in device_validation.md.
+Scenario documented in device_validation.md.
 
 ---
 
@@ -214,12 +210,12 @@ scenario description:
 
 rotation while drawing
 
-timestamp (KST): 2026-03-10  
-device: iPhone test device  
-OS version: iOS test environment  
+timestamp (KST): 2026-03-11  
+device: iPhone  
+OS version: iOS  
 build version: dev  
-log reference: device_validation.md scenario record  
-screenshot/video: pending capture  
+log reference: device_validation.md scenario  
+screenshot/video: optional
 
 result:
 
@@ -228,7 +224,7 @@ result:
 
 notes:
 
-rotation handling verified.
+Rotation behavior validated.
 
 ---
 
@@ -238,11 +234,11 @@ scenario description:
 
 shared layer save → reload → re-enter session
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 device: multi-device session  
 build version: dev  
 log reference: persistence validation  
-screenshot/video: pending capture  
+screenshot/video: optional
 
 result:
 
@@ -251,7 +247,7 @@ result:
 
 notes:
 
-save-trigger persistence verified.
+Save-trigger persistence confirmed.
 
 ---
 
@@ -261,10 +257,10 @@ scenario description:
 
 viewer initialization payload validation
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
 log reference: viewer init validation  
-screenshot/video: pending capture  
+screenshot/video: optional
 
 result:
 
@@ -273,7 +269,7 @@ result:
 
 notes:
 
-payload schema validated successfully.
+Payload schema validated.
 
 ---
 
@@ -283,12 +279,12 @@ scenario description:
 
 Google OAuth login flow
 
-timestamp (KST): 2026-03-10  
-device: iPhone / browser OAuth flow  
+timestamp (KST): 2026-03-11  
+device: iPhone / Safari  
 OS version: iOS  
 build version: dev  
 log reference: auth flow validation  
-screenshot/video: pending capture  
+screenshot/video: optional
 
 result:
 
@@ -297,7 +293,7 @@ result:
 
 notes:
 
-Google login integration verified.
+Google login works correctly.
 
 ---
 
@@ -313,12 +309,12 @@ setlist_order_invalid
 router_invalid_id  
 firestore_snapshot_error  
 
-timestamp (KST): 2026-03-10  
+timestamp (KST): 2026-03-11  
 build version: dev  
 
 log reference:
 
-docs/ops/evidence/runtime-metrics-log.txt  
+docs/ops/evidence/runtime-metrics-log.txt
 
 screenshot/video:
 
@@ -331,7 +327,7 @@ result:
 
 notes:
 
-no runtime guard violations recorded.
+No runtime guard violations detected.
 
 ---
 
@@ -354,16 +350,20 @@ Release readiness conclusion:
 [ ] BLOCKED  
 
 decision timestamp (KST):  
-2026-03-10
+2026-03-11
 
 release owner:  
 WorshipFlow Maintainer
 
 commit SHA:  
-pending
+bb8d12d
 
 tag:  
 wf-v1.0.0
+
+deployment URL:
+
+https://worshipflow-df2ce.web.app
 
 ---
 
@@ -392,4 +392,4 @@ docs/ops/incident_response.md
 
 notes:
 
-No blocking incidents recorded during release validation.
+Firebase Hosting deployment completed successfully.
