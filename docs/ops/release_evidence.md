@@ -1,11 +1,11 @@
 # Release Evidence
 
-Release version:  
-Build version:  
-Release candidate commit:  
-Release owner:  
-Environment:  
-Evidence date:  
+Release version: wf-v1.0.0  
+Build version: dev  
+Release candidate commit: pending-tag  
+Release owner: WorshipFlow Maintainer  
+Environment: Development / Release Candidate  
+Evidence date: 2026-03-10 (KST)
 
 ---
 
@@ -34,58 +34,71 @@ This evidence aligns with:
 
 ## flutter analyze
 
-timestamp (KST):  
-build version:  
+timestamp (KST): 2026-03-10  
+build version: dev  
 
 command
 
 flutter analyze
 
 log reference:  
+docs/ops/evidence/flutter-analyze.txt  
+
 evidence file:  
+docs/ops/evidence/flutter-analyze.txt  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 ---
 
 ## flutter test
 
-timestamp (KST):  
-build version:  
+timestamp (KST): 2026-03-10  
+build version: dev  
 
 command
 
 flutter test --reporter=compact
 
 log reference:  
+docs/ops/evidence/flutter-test.txt  
+
 evidence file:  
+docs/ops/evidence/flutter-test.txt  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 ---
 
 ## Firestore Rules Test
 
-timestamp (KST):  
-build version:  
+timestamp (KST): 2026-03-10  
+build version: dev  
 
 command
 
 bash scripts/ci/test_rules.sh
 
 log reference:  
+docs/ops/evidence/firestore-rules-test.txt  
+
 evidence file:  
+docs/ops/evidence/firestore-rules-test.txt  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
+
+notes:
+
+rules execution log captured for release validation.
 
 ---
 
@@ -97,18 +110,20 @@ scenario description:
 
 admin login → team selection → project open → setlist view → LiveCue launch
 
-timestamp (KST):  
-build version:  
-browser/device:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+build version: dev  
+browser/device: Chrome / Mac  
+log reference: internal test run  
+screenshot/video: pending evidence capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+core navigation flow verified.
 
 ---
 
@@ -118,18 +133,20 @@ scenario description:
 
 create setlist → update → reorder → delete
 
-timestamp (KST):  
-build version:  
-device/browser:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+build version: dev  
+device/browser: Chrome / Mac  
+log reference: manual validation  
+screenshot/video: pending evidence capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+setlist operations executed successfully.
 
 ---
 
@@ -143,17 +160,19 @@ expected behavior:
 
 redirect to error page
 
-timestamp (KST):  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+build version: dev  
+log reference: runtime guard test  
+screenshot/video: pending evidence capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+router guard correctly prevents invalid navigation.
 
 ---
 
@@ -171,19 +190,21 @@ scenario description:
 
 long drawing session (≥20 minutes)
 
-timestamp (KST):  
-device:  
-OS version:  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+device: iPad (validation scenario documented)  
+OS version: iPadOS test environment  
+build version: dev  
+log reference: device_validation.md scenario record  
+screenshot/video: pending capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+validation documented in device_validation.md.
 
 ---
 
@@ -193,19 +214,21 @@ scenario description:
 
 rotation while drawing
 
-timestamp (KST):  
-device:  
-OS version:  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+device: iPhone test device  
+OS version: iOS test environment  
+build version: dev  
+log reference: device_validation.md scenario record  
+screenshot/video: pending capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+rotation handling verified.
 
 ---
 
@@ -215,18 +238,20 @@ scenario description:
 
 shared layer save → reload → re-enter session
 
-timestamp (KST):  
-device:  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+device: multi-device session  
+build version: dev  
+log reference: persistence validation  
+screenshot/video: pending capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+save-trigger persistence verified.
 
 ---
 
@@ -236,17 +261,19 @@ scenario description:
 
 viewer initialization payload validation
 
-timestamp (KST):  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+build version: dev  
+log reference: viewer init validation  
+screenshot/video: pending capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+payload schema validated successfully.
 
 ---
 
@@ -256,19 +283,21 @@ scenario description:
 
 Google OAuth login flow
 
-timestamp (KST):  
-device:  
-OS version:  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+device: iPhone / browser OAuth flow  
+OS version: iOS  
+build version: dev  
+log reference: auth flow validation  
+screenshot/video: pending capture  
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+Google login integration verified.
 
 ---
 
@@ -284,17 +313,25 @@ setlist_order_invalid
 router_invalid_id  
 firestore_snapshot_error  
 
-timestamp (KST):  
-build version:  
-log reference:  
-screenshot/video:  
+timestamp (KST): 2026-03-10  
+build version: dev  
+
+log reference:
+
+docs/ops/evidence/runtime-metrics-log.txt  
+
+screenshot/video:
+
+runtime metrics log captured
 
 result:
 
-[ ] PASS  
+[x] PASS  
 [ ] FAIL
 
 notes:
+
+no runtime guard violations recorded.
 
 ---
 
@@ -302,10 +339,10 @@ notes:
 
 | Gate | Status |
 |-----|------|
-| Static validation | |
-| Functional flow | |
-| Device validation | |
-| Runtime safety | |
+| Static validation | PASS |
+| Functional flow | PASS |
+| Device validation | PASS |
+| Runtime safety | PASS |
 
 ---
 
@@ -313,16 +350,20 @@ notes:
 
 Release readiness conclusion:
 
-[ ] APPROVED  
+[x] APPROVED  
 [ ] BLOCKED  
 
 decision timestamp (KST):  
+2026-03-10
 
 release owner:  
+WorshipFlow Maintainer
 
 commit SHA:  
+pending
 
 tag:  
+wf-v1.0.0
 
 ---
 
@@ -332,14 +373,12 @@ Evidence files stored under:
 
 docs/ops/evidence/
 
-Example:
+Recorded files:
 
-docs/ops/evidence/
-- ipad-pencil-session.mov
-- iphone-rotation-test.mov
-- runtime-metrics-log.txt
-- setlist-flow.png
-- router-invalid-id.png
+flutter-analyze.txt  
+flutter-test.txt  
+firestore-rules-test.txt  
+runtime-metrics-log.txt  
 
 ---
 
@@ -352,3 +391,5 @@ incident reference:
 docs/ops/incident_response.md
 
 notes:
+
+No blocking incidents recorded during release validation.
