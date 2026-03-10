@@ -24,6 +24,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify no service account keys in workspace
+        run: |
+          chmod +x scripts/ci/verify_no_service_account_keys.sh
+          scripts/ci/verify_no_service_account_keys.sh
+
       - name: Verify storage CORS policy file
         run: |
           chmod +x scripts/ci/verify_storage_cors_policy.sh
@@ -49,6 +54,11 @@ jobs:
           chmod +x scripts/ci/verify_deploy_gates.sh
           scripts/ci/verify_deploy_gates.sh
 
+      - name: Verify LiveCue repro matrix
+        run: |
+          chmod +x scripts/ci/verify_livecue_repro_matrix.sh
+          scripts/ci/verify_livecue_repro_matrix.sh
+
       - name: Install lcov (best effort)
         run: |
           sudo apt-get update
@@ -58,6 +68,10 @@ jobs:
         run: |
           chmod +x scripts/ci/check_coverage.sh
           scripts/ci/check_coverage.sh
+
+      - name: Coverage raw report
+        run: |
+          COVERAGE_EXCLUDE_REGEX="" COVERAGE_MIN=0 scripts/ci/check_coverage.sh
 
       - name: Build web release
         run: |

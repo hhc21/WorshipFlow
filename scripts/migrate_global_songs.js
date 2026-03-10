@@ -3,16 +3,41 @@
  *
  * Prereqs:
  * 1) export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
- * 2) node scripts/migrate_global_songs.js
+ * 2) export MIGRATION_PROJECT_ID=<firebase-project-id>
+ * 3) export MIGRATION_CONFIRM_PROJECT=<same-project-id>
+ * 4) DRY_RUN=1 node scripts/migrate_global_songs.js
  *
  * Optional env:
- *  - DRY_RUN=1 (no writes)
+ *  - DRY_RUN=1 (default, no writes)
+ *  - DRY_RUN=0 (enable writes)
  */
 
 const admin = require('firebase-admin');
 
-const projectId = 'worshipflow-df2ce';
-const dryRun = process.env.DRY_RUN === '1';
+const credentialsPath = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+const projectId = (process.env.MIGRATION_PROJECT_ID || '').trim();
+const confirmProjectId = (process.env.MIGRATION_CONFIRM_PROJECT || '').trim();
+const dryRun = process.env.DRY_RUN !== '0';
+
+function fail(message) {
+  console.error(`[migration-preflight] ${message}`);
+  process.exit(1);
+}
+
+if (!credentialsPath) {
+  fail('GOOGLE_APPLICATION_CREDENTIALS is required.');
+}
+if (!projectId) {
+  fail('MIGRATION_PROJECT_ID is required.');
+}
+if (!confirmProjectId) {
+  fail('MIGRATION_CONFIRM_PROJECT is required.');
+}
+if (projectId !== confirmProjectId) {
+  fail(
+    `Project confirmation mismatch: MIGRATION_PROJECT_ID=${projectId}, MIGRATION_CONFIRM_PROJECT=${confirmProjectId}`
+  );
+}
 
 admin.initializeApp({
   credential: admin.credential.applicationDefault(),
@@ -25,6 +50,10 @@ const bucket = admin.storage().bucket();
 const normalize = (title) => title.trim().toLowerCase();
 
 async function main() {
+  console.log('[migration-preflight] credentials path:', credentialsPath);
+  console.log('[migration-preflight] project id:', projectId);
+  console.log('[migration-preflight] mode:', dryRun ? 'DRY_RUN=1' : 'DRY_RUN=0');
+
   const teamsSnap = await db.collection('teams').get();
   const globalIndex = new Map();
 

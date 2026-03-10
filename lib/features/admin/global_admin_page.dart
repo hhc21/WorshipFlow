@@ -8,7 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:http/http.dart' as http;
 
+import '../../app/ui_components.dart';
 import '../../services/firebase_providers.dart';
+import '../../utils/firestore_id.dart';
 import '../../utils/browser_helpers.dart';
 import '../../utils/browser_types.dart';
 import '../../utils/clipboard_helper.dart';
@@ -100,6 +102,45 @@ class _GlobalAdminPageState extends ConsumerState<GlobalAdminPage> {
   ) async {
     final snapshot = await firestore.collection('teams').get();
     return snapshot.docs;
+  }
+
+  Future<void> _openTeamHome(BuildContext context, String teamId) async {
+    final normalized = teamId.trim();
+    if (!isValidFirestoreDocId(normalized)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('팀 ID가 올바르지 않아 팀 홈으로 이동할 수 없습니다.')),
+      );
+      return;
+    }
+    try {
+      final teamDoc = await ref
+          .read(firestoreProvider)
+          .collection('teams')
+          .doc(normalized)
+          .get()
+          .timeout(const Duration(seconds: 8));
+      if (!teamDoc.exists) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('선택한 팀이 존재하지 않아 이동할 수 없습니다.')),
+        );
+        return;
+      }
+    } on FirebaseException catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('팀 확인 실패: ${error.message ?? error.code}')),
+      );
+      return;
+    } on TimeoutException {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('팀 정보 확인 시간이 초과되었습니다.')));
+      return;
+    }
+    if (!context.mounted) return;
+    context.go('/teams/${Uri.encodeComponent(normalized)}');
   }
 
   Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadGlobalSongs(
@@ -1116,23 +1157,48 @@ class _GlobalAdminPageState extends ConsumerState<GlobalAdminPage> {
             future: _loadTeams(firestore),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return const AppLoadingState(message: '팀 목록을 불러오는 중...');
+              }
+              if (snapshot.hasError) {
+                return AppStateCard(
+                  icon: Icons.groups_2_outlined,
+                  isError: true,
+                  title: '팀 목록 로드 실패',
+                  message: '${snapshot.error}',
+                  actionLabel: '다시 시도',
+                  onAction: () => setState(() {}),
+                );
               }
               final teams = snapshot.data ?? [];
               if (teams.isEmpty) {
-                return const Text('팀이 없습니다.');
+                return const AppStateCard(
+                  icon: Icons.groups_2_outlined,
+                  title: '팀이 없습니다',
+                  message: '생성된 팀이 없거나 조회 가능한 팀이 없습니다.',
+                );
               }
               return Column(
                 children: teams.map((team) {
                   final data = team.data();
                   return ListTile(
+                    onTap: () => unawaited(_openTeamHome(context, team.id)),
                     title: Text(data['name']?.toString() ?? team.id),
                     subtitle: Text('팀 ID: ${team.id}'),
-                    trailing: ElevatedButton(
-                      onPressed: _migrating
-                          ? null
-                          : () => _migrateTeam(context, team.id),
-                      child: const Text('이 팀 마이그레이션'),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: [
+                        OutlinedButton(
+                          onPressed: () =>
+                              unawaited(_openTeamHome(context, team.id)),
+                          child: const Text('팀 홈 열기'),
+                        ),
+                        ElevatedButton(
+                          onPressed: _migrating
+                              ? null
+                              : () => _migrateTeam(context, team.id),
+                          child: const Text('이 팀 마이그레이션'),
+                        ),
+                      ],
                     ),
                   );
                 }).toList(),
@@ -1161,11 +1227,25 @@ class _GlobalAdminPageState extends ConsumerState<GlobalAdminPage> {
             future: _loadGlobalSongs(firestore),
             builder: (context, snapshot) {
               if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return const AppLoadingState(message: '전역 곡 목록을 불러오는 중...');
+              }
+              if (snapshot.hasError) {
+                return AppStateCard(
+                  icon: Icons.library_music_outlined,
+                  isError: true,
+                  title: '전역 곡 목록 로드 실패',
+                  message: '${snapshot.error}',
+                  actionLabel: '다시 시도',
+                  onAction: () => setState(() {}),
+                );
               }
               final songs = snapshot.data ?? [];
               if (songs.isEmpty) {
-                return const Text('전역 곡이 없습니다.');
+                return const AppStateCard(
+                  icon: Icons.library_music_outlined,
+                  title: '전역 곡이 없습니다',
+                  message: '전역 곡을 추가하면 운영자 도구에서 관리할 수 있습니다.',
+                );
               }
               return Column(
                 children: songs.map((doc) {

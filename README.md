@@ -48,21 +48,14 @@ firebase deploy
 - `firestore.rules`
 - `storage.rules`
 
-## CI/CD (GitHub Actions)
-- CI: `.github/workflows/ci.yml`
-  - `flutter analyze`
-  - `flutter test --coverage`
-  - `scripts/ci/check_coverage.sh`
-  - `flutter build web --release`
-- Staging Deploy: `.github/workflows/deploy_staging.yml`
-- Production Deploy: `.github/workflows/deploy_prod.yml`
+## 운영 정책 (중요)
+- GitHub는 **백업/복구 용도만 사용**합니다.
+- 운영 필수 절차는 로컬 실행 기준이며, GitHub Actions는 참고/검증 보조 자료입니다.
+- 운영 절차는 `docs/release_runbook.md`를 기준으로 진행합니다.
 
-### GitHub Environments 권장 시크릿
-- `staging` / `production` 각각 분리:
-  - `FIREBASE_PROJECT_ID`
-  - `FIREBASE_SERVICE_ACCOUNT_JSON` (권장) 또는 `FIREBASE_TOKEN` (임시)
-
-운영 절차는 `docs/release_runbook.md`를 기준으로 진행합니다.
+## GitHub Workflows (참고용)
+- CI 참조: `.github/workflows/ci.yml`
+- 배포 템플릿 참조: `.github/workflows/deploy_staging.yml`, `.github/workflows/deploy_prod.yml`
 
 ## Firestore 컬렉션 구조 (권장)
 ```

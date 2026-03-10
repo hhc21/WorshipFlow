@@ -178,6 +178,13 @@ service cloud.firestore {
     match /users/{userId} {
       allow read, write: if isSignedIn() && request.auth.uid == userId;
 
+      match /ClientProbe/{probeId} {
+        allow read, create, update: if isSignedIn()
+          && request.auth.uid == userId
+          && probeId == 'mobile';
+        allow delete: if false;
+      }
+
       match /teamMemberships/{teamId} {
         allow read: if isSignedIn() && request.auth.uid == userId;
         allow create, update: if request.resource.data.teamId == teamId
@@ -200,6 +207,18 @@ service cloud.firestore {
           );
         allow delete: if (isSignedIn() && request.auth.uid == userId) || isTeamAdmin(teamId);
       }
+    }
+
+    // Query-safe collectionGroup('members') fallback for own membership lookup.
+    // This keeps team-select nickname/team discovery working even when legacy
+    // membership mirrors exist, without granting broad member directory access.
+    match /{anyPath=**}/members/{memberId} {
+      allow get, list: if isSignedIn()
+        && (
+          memberId == request.auth.uid
+          || memberDocBelongsToRequester(resource.data)
+        );
+      allow create, update, delete: if false;
     }
 
     match /teams/{teamId} {

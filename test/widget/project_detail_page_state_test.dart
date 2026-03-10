@@ -63,7 +63,9 @@ void main() {
     },
   );
 
-  testWidgets('self-heals creator member doc and renders tabs', (tester) async {
+  testWidgets('allows creator access without member repair and renders tabs', (
+    tester,
+  ) async {
     final firestore = FakeFirebaseFirestore();
     await firestore.collection('teams').doc('team-a').set({
       'name': 'Alpha',
@@ -109,8 +111,15 @@ void main() {
         .collection('members')
         .doc('u-1')
         .get();
-    expect(memberDoc.exists, isTrue);
-    expect(memberDoc.data()?['role'], 'admin');
+    final teamDoc = await firestore.collection('teams').doc('team-a').get();
+    final memberUids =
+        (teamDoc.data()?['memberUids'] as List?)
+            ?.map((value) => value.toString())
+            .toList() ??
+        const <String>[];
+
+    expect(memberDoc.exists, isFalse);
+    expect(memberUids.contains('u-1'), isFalse);
   });
 
   testWidgets('offers fallback project action when target project is missing', (

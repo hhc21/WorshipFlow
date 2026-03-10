@@ -70,6 +70,17 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     setState(_invalidateMembershipCaches);
   }
 
+  void _openTeamHome(BuildContext context, String teamId) {
+    final normalized = teamId.trim();
+    if (!isValidFirestoreDocId(normalized)) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('잘못된 팀 정보입니다.')));
+      return;
+    }
+    context.go('/teams/${Uri.encodeComponent(normalized)}');
+  }
+
   String _fallbackUserName(User user) {
     final displayName = (user.displayName ?? '').trim();
     if (displayName.isNotEmpty) return displayName;
@@ -248,22 +259,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       );
     } finally {
       controller.dispose();
-    }
-  }
-
-  Future<void> _deleteUserTeamMembershipMirror({
-    required FirebaseFirestore firestore,
-    required String uid,
-    required String teamId,
-  }) async {
-    try {
-      await _userTeamMembershipRef(
-        firestore: firestore,
-        uid: uid,
-        teamId: teamId,
-      ).delete();
-    } on FirebaseException {
-      // Ignore cleanup failure; this is best-effort hygiene.
     }
   }
 
@@ -609,7 +604,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
   Future<List<_TeamMembership>> _fetchTeams(String uid) async {
     final firestore = ref.read(firestoreProvider);
     final auth = ref.read(firebaseAuthProvider);
-    final currentUser = auth.currentUser;
     final email = auth.currentUser?.email?.toLowerCase();
     final byTeamId = <String, _TeamMembership>{};
     final teamDocById = <String, QueryDocumentSnapshot<Map<String, dynamic>>>{};
@@ -768,15 +762,10 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         );
       }
 
-      // Hydrate team names/roles and self-heal missing fields.
+      // Hydrate team names/roles with read-only normalization.
       for (final teamId in byTeamId.keys.toList()) {
         if (!isValidFirestoreDocId(teamId)) {
           byTeamId.remove(teamId);
-          await _deleteUserTeamMembershipMirror(
-            firestore: firestore,
-            uid: uid,
-            teamId: teamId,
-          );
           continue;
         }
         final current = byTeamId[teamId];
@@ -790,11 +779,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
               await teamRef.get().timeout(const Duration(seconds: 12));
           if (!teamDoc.exists) {
             byTeamId.remove(teamId);
-            await _deleteUserTeamMembershipMirror(
-              firestore: firestore,
-              uid: uid,
-              teamId: teamId,
-            );
             continue;
           }
 
@@ -812,11 +796,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
 
           if (!memberDoc.exists && !isCreator && !inMemberUids) {
             byTeamId.remove(teamId);
-            await _deleteUserTeamMembershipMirror(
-              firestore: firestore,
-              uid: uid,
-              teamId: teamId,
-            );
             continue;
           }
 
@@ -834,83 +813,15 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
             nextLastProjectId = remoteLastProjectId;
           }
 
-          if (!inMemberUids) {
-            await teamRef.set({
-              'memberUids': FieldValue.arrayUnion([uid]),
-            }, SetOptions(merge: true));
-          }
-
           if (memberDoc.exists) {
             final memberData = memberDoc.data() ?? const <String, dynamic>{};
             final role = memberData['role']?.toString().trim();
             if (role != null && role.isNotEmpty) {
               nextRole = teamRoleKey(role);
             }
-
-            final needsBackfillUserId = (memberData['userId'] ?? '')
-                .toString()
-                .trim()
-                .isEmpty;
-            final needsBackfillUid = (memberData['uid'] ?? '')
-                .toString()
-                .trim()
-                .isEmpty;
-            final needsBackfillEmail =
-                email != null &&
-                email.isNotEmpty &&
-                (memberData['email'] ?? '').toString().trim().isEmpty;
-            final needsBackfillNickname = (memberData['nickname'] ?? '')
-                .toString()
-                .trim()
-                .isEmpty;
-            if (needsBackfillUserId ||
-                needsBackfillUid ||
-                needsBackfillEmail ||
-                needsBackfillNickname) {
-              final fallbackNickname =
-                  (auth.currentUser?.displayName ?? email ?? '사용자')
-                      .toString()
-                      .trim();
-              final nickname = currentUser == null
-                  ? (fallbackNickname.isEmpty ? '사용자' : fallbackNickname)
-                  : await _resolveOwnNickname(firestore, currentUser);
-              await memberRef.set({
-                'userId': uid,
-                'uid': uid,
-                if (email != null && email.isNotEmpty) 'email': email,
-                'nickname': nickname,
-              }, SetOptions(merge: true));
-            }
-          } else if (nextRole == 'admin') {
-            // Legacy self-heal: ensure creator has a member doc.
-            final nickname = currentUser == null
-                ? (auth.currentUser?.displayName ?? email ?? '사용자')
-                : await _resolveOwnNickname(firestore, currentUser);
-            await memberRef.set({
-              'userId': uid,
-              'uid': uid,
-              'email': email,
-              'displayName': auth.currentUser?.displayName,
-              'nickname': nickname,
-              'role': 'admin',
-              'teamName': nextName,
-              'capabilities': {'songEditor': true},
-              'createdAt': FieldValue.serverTimestamp(),
-            }, SetOptions(merge: true));
+          } else if (isCreator) {
+            nextRole = 'admin';
           }
-
-          await _userTeamMembershipRef(
-            firestore: firestore,
-            uid: uid,
-            teamId: teamId,
-          ).set({
-            'teamId': teamId,
-            'teamName': nextName,
-            'role': nextRole,
-            if (nextLastProjectId != null && nextLastProjectId.isNotEmpty)
-              'lastProjectId': nextLastProjectId,
-            'updatedAt': FieldValue.serverTimestamp(),
-          }, SetOptions(merge: true));
 
           byTeamId[teamId] = _TeamMembership(
             teamId: teamId,
@@ -921,11 +832,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         } on FirebaseException catch (error) {
           if (error.code == 'permission-denied') {
             byTeamId.remove(teamId);
-            await _deleteUserTeamMembershipMirror(
-              firestore: firestore,
-              uid: uid,
-              teamId: teamId,
-            );
             continue;
           }
           rethrow;
@@ -1315,6 +1221,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         fetchInviteLink: _fetchInviteLink,
         acceptInviteLink: _acceptInviteLink,
         onRefresh: _refreshMembershipData,
+        openTeamHome: _openTeamHome,
       ),
       _SongLibraryTab(onGoTeamsTab: () => _setTab(0)),
     ];
@@ -1499,6 +1406,7 @@ class _TeamsTab extends StatelessWidget {
   final Future<void> Function(BuildContext context, _InviteLinkInfo invite)
   acceptInviteLink;
   final VoidCallback onRefresh;
+  final void Function(BuildContext context, String teamId) openTeamHome;
 
   const _TeamsTab({
     required this.user,
@@ -1514,6 +1422,7 @@ class _TeamsTab extends StatelessWidget {
     required this.fetchInviteLink,
     required this.acceptInviteLink,
     required this.onRefresh,
+    required this.openTeamHome,
   });
 
   Widget _stepLine(BuildContext context, String step, String text) {
@@ -1720,7 +1629,7 @@ class _TeamsTab extends StatelessWidget {
                     ],
                   ),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () => context.go('/teams/${team.teamId}'),
+                  onTap: () => openTeamHome(context, team.teamId),
                 ),
               );
             },

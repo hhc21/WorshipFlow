@@ -44,14 +44,12 @@
   - iPad Safari 회색/검은 화면이 독립 세션 2건 이상이면 즉시 롤백
   - 필기 입력 손실 재현 시 즉시 롤백
 
-## 5) 배포 게이트 연동
-- Production 배포 전 반드시 Safari 스모크 결과를 입력한다.
-- 워크플로우:
-  - `.github/workflows/deploy_prod.yml`
-  - 입력값:
-    - `livecue_safari_smoke_result=pass`
-    - `livecue_safari_smoke_evidence=<이슈/영상 링크>`
-- 검증 스크립트:
+## 5) 릴리즈 게이트 연동 (로컬 기준)
+- Production 반영 전 반드시 Safari 스모크 결과를 기록한다.
+- 필수 기록:
+  - `livecue_safari_smoke_result=pass`
+  - `livecue_safari_smoke_evidence=<이슈/영상 링크>`
+- 검증 스크립트(로컬 실행):
   - `scripts/ci/verify_livecue_safari_gate.sh`
 
 ## 6) 사후 기록
@@ -64,12 +62,12 @@
 
 ## 7) 롤백 실행 책임/증빙
 - 1차 담당: 배포 실행자(Release owner)
-- 2차 승인: 운영 승인자(Production environment reviewer)
-- 실행 명령/절차:
-  - GitHub `deploy-production` 워크플로우를 이전 안정 tag로 재실행
-  - `release_ref=<stable-tag>`, `livecue_safari_smoke_result=pass`, `livecue_safari_smoke_evidence=<링크>`
+- 2차 승인: 운영 승인자
+- 실행 절차(백업/복구 정책):
+  - 로컬에서 이전 안정 backup ref(`tag`/`commit`)를 체크아웃
+  - 로컬 검증(`flutter analyze`, `flutter test --coverage`, Safari smoke) 후 재배포
 - 증빙 경로:
-  - 배포 실행 로그 URL
+  - 로컬 배포/복구 실행 로그
   - `docs/livecue_repro_matrix.md` 재검증 결과
   - 장애/복구 영상 링크
 

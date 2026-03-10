@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "77945139809",
+    "project_id": "worshipflow-df2ce",
+    "storage_bucket": "worshipflow-df2ce.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:77945139809:android:11aac0260ab9c62eb4b020",
+        "android_client_info": {
+          "package_name": "com.example.worshipflow"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "77945139809-tflf5i25bfba92nkm2l1791hr0pn9p0a.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.worshipflow",
+            "certificate_hash": "8222d655612807c8521b6090dbeb275e1996b649"
+          }
+        },
+        {
+          "client_id": "77945139809-t1h12pr7eircen9dvtnqe93steujtll7.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDQKomVXXZXnMVRTYr7Uk4LsJB5Gy3mWME"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "77945139809-t1h12pr7eircen9dvtnqe93steujtll7.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "77945139809-o2kpdpjltbf66cn62cq8vlvfoi5i97t9.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.worshipflow"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

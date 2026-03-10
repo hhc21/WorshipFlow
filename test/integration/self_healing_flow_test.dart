@@ -15,7 +15,7 @@ void main() {
     }
   }
 
-  testWidgets('self-healing: creator member doc is restored from team select', (
+  testWidgets('read-path: creator team is visible without member repair', (
     tester,
   ) async {
     final firestore = FakeFirebaseFirestore();
@@ -55,16 +55,16 @@ void main() {
         .doc('team-heal')
         .get();
 
-    expect(repairedMember.exists, isTrue);
-    expect(repairedMember.data()?['role'], 'admin');
+    expect(find.text('Heal Team'), findsOneWidget);
+    expect(repairedMember.exists, isFalse);
     expect(
       (repairedTeam.data()?['memberUids'] as List?)?.contains('creator-1'),
-      isTrue,
+      isFalse,
     );
   });
 
   testWidgets(
-    'self-healing: stale mirror membership is cleaned from team select',
+    'read-path: stale mirror membership is ignored without cleanup write',
     (tester) async {
       final firestore = FakeFirebaseFirestore();
       final auth = buildSignedInAuth(
@@ -133,60 +133,60 @@ void main() {
           .get();
 
       expect(find.text('Alpha Team'), findsOneWidget);
-      expect(staleMirror.exists, isFalse);
+      expect(find.text('Ghost Team'), findsNothing);
+      expect(staleMirror.exists, isTrue);
     },
   );
 
-  testWidgets(
-    'self-healing: recent project id is synced to membership mirror',
-    (tester) async {
-      final firestore = FakeFirebaseFirestore();
-      final auth = buildSignedInAuth(
-        uid: 'user-1',
-        email: 'user1@example.com',
-        displayName: 'User One',
-      );
+  testWidgets('read-path: team lastProjectId is shown without mirror sync', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    final auth = buildSignedInAuth(
+      uid: 'user-1',
+      email: 'user1@example.com',
+      displayName: 'User One',
+    );
 
-      await firestore.collection('teams').doc('team-a').set({
-        'name': 'Alpha Team',
-        'createdBy': 'owner-9',
-        'memberUids': ['user-1'],
-        'lastProjectId': '2026.03.04',
-        'createdAt': Timestamp.now(),
-      });
-      await firestore
-          .collection('teams')
-          .doc('team-a')
-          .collection('members')
-          .doc('user-1')
-          .set({
-            'role': 'member',
-            'email': 'user1@example.com',
-            'displayName': 'User One',
-            'createdAt': Timestamp.now(),
-          });
+    await firestore.collection('teams').doc('team-a').set({
+      'name': 'Alpha Team',
+      'createdBy': 'owner-9',
+      'memberUids': ['user-1'],
+      'lastProjectId': '2026.03.04',
+      'createdAt': Timestamp.now(),
+    });
+    await firestore
+        .collection('teams')
+        .doc('team-a')
+        .collection('members')
+        .doc('user-1')
+        .set({
+          'role': 'member',
+          'email': 'user1@example.com',
+          'displayName': 'User One',
+          'createdAt': Timestamp.now(),
+        });
 
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            firebaseAuthProvider.overrideWithValue(auth),
-            firestoreProvider.overrideWithValue(firestore),
-            globalAdminProvider.overrideWith((ref) async => false),
-          ],
-          child: const MaterialApp(home: TeamSelectPage()),
-        ),
-      );
-      await pumpMembershipLoader(tester);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          firebaseAuthProvider.overrideWithValue(auth),
+          firestoreProvider.overrideWithValue(firestore),
+          globalAdminProvider.overrideWith((ref) async => false),
+        ],
+        child: const MaterialApp(home: TeamSelectPage()),
+      ),
+    );
+    await pumpMembershipLoader(tester);
 
-      final membershipMirror = await firestore
-          .collection('users')
-          .doc('user-1')
-          .collection('teamMemberships')
-          .doc('team-a')
-          .get();
+    final membershipMirror = await firestore
+        .collection('users')
+        .doc('user-1')
+        .collection('teamMemberships')
+        .doc('team-a')
+        .get();
 
-      expect(membershipMirror.exists, isTrue);
-      expect(membershipMirror.data()?['lastProjectId'], '2026.03.04');
-    },
-  );
+    expect(find.text('최근 프로젝트: 2026.03.04'), findsOneWidget);
+    expect(membershipMirror.exists, isFalse);
+  });
 }

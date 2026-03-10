@@ -21,8 +21,9 @@ Future<void> _pumpLoading(WidgetTester tester, {int ticks = 14}) async {
 }
 
 Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
-  WidgetTester tester,
-) async {
+  WidgetTester tester, {
+  Map<String, Object?>? liveCueStateOverride,
+}) async {
   final firestore = FakeFirebaseFirestore();
   final auth = buildSignedInAuth(
     uid: 'leader-1',
@@ -86,6 +87,18 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
         'freeTextTitle': '두 번째 곡',
         'keyText': 'E',
       });
+  final liveCueState = <String, Object?>{
+    'currentCueLabel': '1',
+    'currentDisplayTitle': '첫 곡',
+    'currentKeyText': 'D',
+    'nextCueLabel': '2',
+    'nextDisplayTitle': '두 번째 곡',
+    'nextKeyText': 'E',
+    'updatedAt': Timestamp.now(),
+  };
+  if (liveCueStateOverride != null) {
+    liveCueState.addAll(liveCueStateOverride);
+  }
   await firestore
       .collection('teams')
       .doc('team-a')
@@ -93,15 +106,7 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
       .doc('p-1')
       .collection('liveCue')
       .doc('state')
-      .set({
-        'currentCueLabel': '1',
-        'currentDisplayTitle': '첫 곡',
-        'currentKeyText': 'D',
-        'nextCueLabel': '2',
-        'nextDisplayTitle': '두 번째 곡',
-        'nextKeyText': 'E',
-        'updatedAt': Timestamp.now(),
-      });
+      .set(liveCueState);
 
   final router = GoRouter(
     initialLocation: '/teams/team-a/projects/p-1',
@@ -201,4 +206,29 @@ void main() {
     );
     expect(find.text('다시 불러오기'), findsOneWidget);
   });
+
+  testWidgets(
+    'live cue e2e: stale cue title without songId falls back to setlist current',
+    (tester) async {
+      final app = await _pumpLiveCueApp(
+        tester,
+        liveCueStateOverride: <String, Object?>{
+          'currentCueLabel': '2',
+          'currentDisplayTitle': '잘못된 이전 제목',
+          'currentFreeTextTitle': '잘못된 이전 제목',
+          'currentSongId': null,
+          'currentKeyText': null,
+          'nextCueLabel': '1',
+          'nextDisplayTitle': '첫 곡',
+          'nextKeyText': 'D',
+        },
+      );
+
+      app.router.go('/teams/team-a/projects/p-1/live');
+      await tester.pumpAndSettle(const Duration(milliseconds: 700));
+      await _pumpLoading(tester, ticks: 8);
+
+      expect(find.textContaining('두 번째 곡'), findsWidgets);
+    },
+  );
 }

@@ -65,7 +65,8 @@ The following scenarios must be covered explicitly.
   - `lib/features/projects/segment_a_page.dart`
   - `lib/features/projects/segment_b_page.dart`
   - `lib/features/teams/team_home_page.dart`
-  - `lib/features/teams/team_invite_panel.dart`
+- Exclusion reduction note:
+  - `lib/features/teams/team_invite_panel.dart` was removed from default exclusion (2026-03-07, step-down phase)
 - Override policy:
   - `COVERAGE_EXCLUDE_REGEX=""` to disable exclusions and measure full scope.
   - `COVERAGE_EXCLUDE_REGEX="<regex>"` to set custom exclusion scope.
@@ -73,6 +74,7 @@ The following scenarios must be covered explicitly.
   - Excluded scope gate: `scripts/ci/check_coverage.sh` (current threshold 35%)
   - Raw scope report: `COVERAGE_EXCLUDE_REGEX="" scripts/ci/check_coverage.sh`
   - Release notes must include both values (`excluded` + `raw`)
+  - CI raw report command (non-blocking gate): `COVERAGE_EXCLUDE_REGEX="" COVERAGE_MIN=0 scripts/ci/check_coverage.sh`
 
 ## 5. Runner Dependency Policy
 - `lcov` install attempted in CI.

@@ -4,7 +4,7 @@ set -euo pipefail
 LCOV_FILE="${1:-coverage/lcov.info}"
 COVERAGE_STAGE="${COVERAGE_STAGE:-baseline}"
 MIN_COVERAGE="${COVERAGE_MIN:-}"
-DEFAULT_EXCLUDE_REGEX='lib/features/projects/live_cue_page\.dart|lib/features/projects/segment_a_page\.dart|lib/features/projects/segment_b_page\.dart|lib/features/teams/team_home_page\.dart|lib/features/teams/team_invite_panel\.dart'
+DEFAULT_EXCLUDE_REGEX='lib/features/projects/live_cue_page\.dart|lib/features/projects/segment_a_page\.dart|lib/features/projects/segment_b_page\.dart|lib/features/teams/team_home_page\.dart'
 COVERAGE_EXCLUDE_REGEX="${COVERAGE_EXCLUDE_REGEX-$DEFAULT_EXCLUDE_REGEX}"
 
 if [[ -z "$MIN_COVERAGE" ]]; then

@@ -6,9 +6,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
+import '../../core/ops/ops_metrics.dart';
+import '../../core/runtime/runtime_guard.dart';
 import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
 import '../../utils/song_parser.dart';
+import 'live_cue_sync_coordinator.dart';
 
 class SegmentAPage extends ConsumerStatefulWidget {
   final String teamId;
@@ -35,6 +38,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
   final TextEditingController _referenceLinksController =
       TextEditingController();
   bool _saving = false;
+  bool _reordering = false;
   bool _scriptureLoaded = false;
 
   @override
@@ -69,7 +73,23 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         .collection('segmentA_setlist')
         .orderBy('order')
         .get();
-    return snapshot.docs;
+    final docs = snapshot.docs;
+    final orderValidation = RuntimeGuard.validateSetlistOrder(
+      docs.map((doc) => doc.data()),
+    );
+    if (!orderValidation.isValid) {
+      OpsMetrics.setlistOrderInvalid(
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'itemCount': docs.length,
+          'missingOrders': orderValidation.missingOrders.join(','),
+          'duplicateOrders': orderValidation.duplicateOrders.join(','),
+          'invalidOrderCount': orderValidation.invalidOrderCount,
+        },
+      );
+    }
+    return docs;
   }
 
   DocumentReference<Map<String, dynamic>> _liveCueRef(
@@ -198,6 +218,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
   Future<void> _syncLiveCueFromSetlist(FirebaseFirestore firestore) async {
     final setlistItems = await _loadSetlist(firestore);
     if (setlistItems.isEmpty) {
+      OpsMetrics.runtimeGuardTriggered(
+        guard: 'setlist_empty_clear_livecue_state',
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+        },
+      );
       await _liveCueRef(firestore).set({
         ..._clearCueFields(prefix: 'current'),
         ..._clearCueFields(prefix: 'next'),
@@ -207,9 +234,30 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     }
 
     final stateSnapshot = await _liveCueRef(firestore).get();
-    final cueData = stateSnapshot.data() ?? {};
+    final cueData = RuntimeGuard.snapshotDataOrEmpty(
+      stateSnapshot,
+      path: 'teams/${widget.teamId}/projects/${widget.projectId}/liveCue/state',
+      fields: <String, Object?>{
+        'teamId': widget.teamId,
+        'projectId': widget.projectId,
+      },
+    );
     final hasCurrent = _hasCueValue(cueData, 'current');
     final hasNext = _hasCueValue(cueData, 'next');
+    if (!hasCurrent || (setlistItems.length > 1 && !hasNext)) {
+      OpsMetrics.liveCueStateInvalid(
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'hasCurrent': hasCurrent,
+          'hasNext': hasNext,
+          'setlistLength': setlistItems.length,
+          'reason': !hasCurrent
+              ? 'missing_current'
+              : 'missing_next_for_multi_setlist',
+        },
+      );
+    }
 
     final updates = <String, dynamic>{};
     if (!hasCurrent) {
@@ -245,6 +293,217 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     if (updates.isEmpty) return;
     updates['updatedAt'] = FieldValue.serverTimestamp();
     await _liveCueRef(firestore).set(updates, SetOptions(merge: true));
+  }
+
+  String _cueLabelFromSetlistItem(
+    Map<String, dynamic> item,
+    int fallbackOrder,
+  ) {
+    final raw = item['cueLabel']?.toString().trim();
+    if (raw != null && raw.isNotEmpty) return raw;
+    final order = item['order'];
+    if (order is num) return order.toInt().toString();
+    return fallbackOrder.toString();
+  }
+
+  Future<void> _syncLiveCueAfterSetlistReorder(
+    FirebaseFirestore firestore,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> setlistItems,
+  ) async {
+    if (setlistItems.isEmpty) {
+      OpsMetrics.runtimeGuardTriggered(
+        guard: 'setlist_empty_clear_livecue_state',
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'source': 'reorder',
+        },
+      );
+      await _liveCueRef(firestore).set({
+        ..._clearCueFields(prefix: 'current'),
+        ..._clearCueFields(prefix: 'next'),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      return;
+    }
+
+    final cueSnapshot = await _liveCueRef(firestore).get();
+    final cueData = RuntimeGuard.snapshotDataOrEmpty(
+      cueSnapshot,
+      path: 'teams/${widget.teamId}/projects/${widget.projectId}/liveCue/state',
+      fields: <String, Object?>{
+        'teamId': widget.teamId,
+        'projectId': widget.projectId,
+        'source': 'reorder',
+      },
+    );
+    final resolvedCurrentIndex = LiveCueResolvedState.findCurrentIndex(
+      items: setlistItems,
+      cueData: cueData,
+      cueLabelFromItem: _cueLabelFromSetlistItem,
+      normalizeKeyText: normalizeKeyText,
+    );
+    final stateValidation = RuntimeGuard.validateLiveCueState(
+      cueData: cueData,
+      setlistLength: setlistItems.length,
+      resolvedCurrentIndex: resolvedCurrentIndex,
+    );
+    var currentIndex = resolvedCurrentIndex;
+    if (stateValidation.requiresFallback) {
+      OpsMetrics.liveCueStateInvalid(
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'hasCurrent': stateValidation.hasCurrent,
+          'hasNext': stateValidation.hasNext,
+          'currentIndexInRange': stateValidation.currentIndexInRange,
+          'nextIndexInRange': stateValidation.nextIndexInRange,
+          'setlistLength': setlistItems.length,
+          'resolvedCurrentIndex': resolvedCurrentIndex,
+          'fallbackCurrentIndex': stateValidation.fallbackCurrentIndex,
+        },
+      );
+      currentIndex = stateValidation.fallbackCurrentIndex;
+    }
+
+    final updates = <String, dynamic>{};
+    updates.addAll(
+      await _cueFieldsFromSetlist(
+        firestore,
+        setlistItems[currentIndex].data(),
+        prefix: 'current',
+      ),
+    );
+    if (currentIndex + 1 < setlistItems.length) {
+      updates.addAll(
+        await _cueFieldsFromSetlist(
+          firestore,
+          setlistItems[currentIndex + 1].data(),
+          prefix: 'next',
+        ),
+      );
+    } else {
+      updates.addAll(_clearCueFields(prefix: 'next'));
+    }
+    updates['updatedAt'] = FieldValue.serverTimestamp();
+    await _liveCueRef(firestore).set(updates, SetOptions(merge: true));
+  }
+
+  Future<void> _reorderSetlistItem(
+    BuildContext context,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> items, {
+    required int oldIndex,
+    required int newIndex,
+  }) async {
+    if (!widget.canEdit || _reordering) return;
+    if (oldIndex < 0 ||
+        oldIndex >= items.length ||
+        newIndex < 0 ||
+        newIndex >= items.length ||
+        oldIndex == newIndex) {
+      return;
+    }
+    final firestore = ref.read(firestoreProvider);
+    final reordered = [...items];
+    final moved = reordered.removeAt(oldIndex);
+    reordered.insert(newIndex, moved);
+
+    setState(() {
+      _reordering = true;
+    });
+
+    try {
+      final batch = firestore.batch();
+      for (var i = 0; i < reordered.length; i++) {
+        batch.update(reordered[i].reference, {'order': i + 1});
+      }
+      await batch.commit();
+
+      final refreshed = await _loadSetlist(firestore);
+      final validation = RuntimeGuard.validateSetlistOrder(
+        refreshed.map((doc) => doc.data()),
+      );
+      if (!validation.isValid) {
+        OpsMetrics.runtimeGuardTriggered(
+          guard: 'setlist_integrity_after_reorder',
+          fields: <String, Object?>{
+            'teamId': widget.teamId,
+            'projectId': widget.projectId,
+            'missingOrders': validation.missingOrders.join(','),
+            'duplicateOrders': validation.duplicateOrders.join(','),
+            'invalidOrderCount': validation.invalidOrderCount,
+          },
+        );
+      }
+      await _syncLiveCueAfterSetlistReorder(firestore, refreshed);
+      if (!context.mounted) return;
+      setState(() {});
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('콘티 순서 변경 실패: $error')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _reordering = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _moveCueToSetlistItem(
+    BuildContext context,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> items, {
+    required int index,
+  }) async {
+    if (!widget.canEdit) return;
+    if (index < 0 || index >= items.length) {
+      OpsMetrics.runtimeGuardTriggered(
+        guard: 'cue_move_invalid_index',
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'index': index,
+          'length': items.length,
+        },
+      );
+      return;
+    }
+    final firestore = ref.read(firestoreProvider);
+    try {
+      final updates = <String, dynamic>{};
+      updates.addAll(
+        await _cueFieldsFromSetlist(
+          firestore,
+          items[index].data(),
+          prefix: 'current',
+        ),
+      );
+      if (index + 1 < items.length) {
+        updates.addAll(
+          await _cueFieldsFromSetlist(
+            firestore,
+            items[index + 1].data(),
+            prefix: 'next',
+          ),
+        );
+      } else {
+        updates.addAll(_clearCueFields(prefix: 'next'));
+      }
+      updates['updatedAt'] = FieldValue.serverTimestamp();
+      await _liveCueRef(firestore).set(updates, SetOptions(merge: true));
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('현재 Cue를 이동했습니다.')));
+      setState(() {});
+    } catch (error) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Cue 이동 실패: $error')));
+    }
   }
 
   Future<void> _saveScripture(BuildContext context) async {
@@ -539,124 +798,116 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
   ) async {
     if (!widget.canEdit) return;
     final data = itemDoc.data();
-    final titleController = TextEditingController(
-      text:
-          data['displayTitle']?.toString() ??
-          data['freeTextTitle']?.toString() ??
-          '',
-    );
-    final keyController = TextEditingController(
-      text: data['keyText']?.toString() ?? '',
-    );
-    final memoController = TextEditingController(
-      text: data['memoShared']?.toString() ?? '',
-    );
-    final cueLabelController = TextEditingController(
-      text: (data['cueLabel'] ?? data['order'] ?? '').toString(),
-    );
-    final linksController = TextEditingController(
-      text: ((data['referenceLinks'] as List?) ?? const []).join('\n'),
-    );
-    try {
-      final updated = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('콘티 수정'),
-          content: SizedBox(
-            width: 460,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: cueLabelController,
-                    decoration: appInputDecoration(
-                      context,
-                      label: '순서 라벨 (예: 1, 1-2)',
-                    ),
+    var draftTitle =
+        data['displayTitle']?.toString() ??
+        data['freeTextTitle']?.toString() ??
+        '';
+    var draftKey = data['keyText']?.toString() ?? '';
+    var draftMemo = data['memoShared']?.toString() ?? '';
+    var draftCueLabel = (data['cueLabel'] ?? data['order'] ?? '').toString();
+    var draftLinks = ((data['referenceLinks'] as List?) ?? const []).join('\n');
+
+    final updated = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('콘티 수정'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  initialValue: draftCueLabel,
+                  onChanged: (value) => draftCueLabel = value,
+                  decoration: appInputDecoration(
+                    dialogContext,
+                    label: '순서 라벨 (예: 1, 1-2)',
                   ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: titleController,
-                    decoration: appInputDecoration(context, label: '제목'),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  initialValue: draftTitle,
+                  onChanged: (value) => draftTitle = value,
+                  decoration: appInputDecoration(dialogContext, label: '제목'),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  initialValue: draftKey,
+                  onChanged: (value) => draftKey = value,
+                  decoration: appInputDecoration(
+                    dialogContext,
+                    label: '키 (선택)',
                   ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: keyController,
-                    decoration: appInputDecoration(context, label: '키 (선택)'),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  initialValue: draftMemo,
+                  onChanged: (value) => draftMemo = value,
+                  decoration: appInputDecoration(dialogContext, label: '메모'),
+                ),
+                const SizedBox(height: 10),
+                TextFormField(
+                  initialValue: draftLinks,
+                  onChanged: (value) => draftLinks = value,
+                  minLines: 1,
+                  maxLines: 3,
+                  decoration: appInputDecoration(
+                    dialogContext,
+                    label: '레퍼런스 링크 (줄바꿈/쉼표 구분)',
                   ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: memoController,
-                    decoration: appInputDecoration(context, label: '메모'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: linksController,
-                    minLines: 1,
-                    maxLines: 3,
-                    decoration: appInputDecoration(
-                      context,
-                      label: '레퍼런스 링크 (줄바꿈/쉼표 구분)',
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('취소'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('저장'),
-            ),
-          ],
         ),
-      );
-      if (updated != true) return;
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('저장'),
+          ),
+        ],
+      ),
+    );
+    if (updated != true) return;
 
-      final firestore = ref.read(firestoreProvider);
-      final referenceLinks = _parseReferenceLinks(linksController.text);
-      final keyText = keyController.text.trim();
-      final cueLabel = cueLabelController.text.trim();
-      final updates = <String, dynamic>{
-        'cueLabel': cueLabel.isEmpty
-            ? (data['order']?.toString() ?? '')
-            : cueLabel,
-        'displayTitle': titleController.text.trim(),
-        'keyText': keyText.isEmpty ? null : normalizeKeyText(keyText),
-        'memoShared': memoController.text.trim(),
-      };
-      if (data['songId'] == null) {
-        updates['freeTextTitle'] = titleController.text.trim();
-      }
-      if (referenceLinks.isEmpty) {
-        updates['referenceLinks'] = FieldValue.delete();
-      } else {
-        updates['referenceLinks'] = referenceLinks;
-      }
-
-      await firestore
-          .collection('teams')
-          .doc(widget.teamId)
-          .collection('projects')
-          .doc(widget.projectId)
-          .collection('segmentA_setlist')
-          .doc(itemDoc.id)
-          .update(updates);
-      await _syncLiveCueFromSetlist(firestore);
-      if (!context.mounted) return;
-      setState(() {});
-    } finally {
-      titleController.dispose();
-      keyController.dispose();
-      memoController.dispose();
-      cueLabelController.dispose();
-      linksController.dispose();
+    final firestore = ref.read(firestoreProvider);
+    final referenceLinks = _parseReferenceLinks(draftLinks);
+    final keyText = draftKey.trim();
+    final cueLabel = draftCueLabel.trim();
+    final nextTitle = draftTitle.trim();
+    final updates = <String, dynamic>{
+      'cueLabel': cueLabel.isEmpty
+          ? (data['order']?.toString() ?? '')
+          : cueLabel,
+      'displayTitle': nextTitle,
+      'keyText': keyText.isEmpty ? null : normalizeKeyText(keyText),
+      'memoShared': draftMemo.trim(),
+    };
+    if (data['songId'] == null) {
+      updates['freeTextTitle'] = nextTitle;
     }
+    if (referenceLinks.isEmpty) {
+      updates['referenceLinks'] = FieldValue.delete();
+    } else {
+      updates['referenceLinks'] = referenceLinks;
+    }
+
+    await firestore
+        .collection('teams')
+        .doc(widget.teamId)
+        .collection('projects')
+        .doc(widget.projectId)
+        .collection('segmentA_setlist')
+        .doc(itemDoc.id)
+        .update(updates);
+    await _syncLiveCueFromSetlist(firestore);
+    if (!context.mounted) return;
+    setState(() {});
   }
 
   Future<void> _deleteSetlistItem(
@@ -922,6 +1173,42 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                         trailing: Wrap(
                           spacing: 2,
                           children: [
+                            if (widget.canEdit)
+                              IconButton(
+                                icon: const Icon(Icons.playlist_play),
+                                tooltip: '현재 Cue로 이동',
+                                onPressed: () => _moveCueToSetlistItem(
+                                  context,
+                                  items,
+                                  index: index,
+                                ),
+                              ),
+                            if (widget.canEdit && index > 0)
+                              IconButton(
+                                icon: const Icon(Icons.arrow_upward),
+                                tooltip: '위로 이동',
+                                onPressed: _reordering
+                                    ? null
+                                    : () => _reorderSetlistItem(
+                                        context,
+                                        items,
+                                        oldIndex: index,
+                                        newIndex: index - 1,
+                                      ),
+                              ),
+                            if (widget.canEdit && index < items.length - 1)
+                              IconButton(
+                                icon: const Icon(Icons.arrow_downward),
+                                tooltip: '아래로 이동',
+                                onPressed: _reordering
+                                    ? null
+                                    : () => _reorderSetlistItem(
+                                        context,
+                                        items,
+                                        oldIndex: index,
+                                        newIndex: index + 1,
+                                      ),
+                              ),
                             if (songId != null)
                               IconButton(
                                 icon: const Icon(Icons.picture_as_pdf),

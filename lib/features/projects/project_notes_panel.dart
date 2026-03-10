@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../services/firebase_providers.dart';
 import '../../services/ops_metrics.dart';
 import '../../utils/firestore_id.dart';
+import 'models/sketch_stroke.dart';
 
 class ProjectNotesPanel extends ConsumerStatefulWidget {
   final String teamId;
@@ -348,8 +349,8 @@ class _NoteSketchDialog extends StatefulWidget {
 
 class _NoteSketchDialogState extends State<_NoteSketchDialog> {
   late final TextEditingController _textController;
-  late List<_SketchStroke> _strokes;
-  _SketchStroke? _activeStroke;
+  late List<SketchStroke> _strokes;
+  SketchStroke? _activeStroke;
   double _strokeWidth = 2.2;
 
   @override
@@ -358,7 +359,7 @@ class _NoteSketchDialogState extends State<_NoteSketchDialog> {
     _textController = TextEditingController(text: widget.initial.text);
     _strokes = widget.initial.strokes
         .map(
-          (stroke) => _SketchStroke(
+          (stroke) => SketchStroke(
             points: List<Offset>.from(stroke.points),
             colorValue: stroke.colorValue,
             width: stroke.width,
@@ -374,17 +375,13 @@ class _NoteSketchDialogState extends State<_NoteSketchDialog> {
   }
 
   Offset _normalizeOffset(Offset local, Size size) {
-    final safeWidth = size.width <= 0 ? 1.0 : size.width;
-    final safeHeight = size.height <= 0 ? 1.0 : size.height;
-    final dx = (local.dx / safeWidth).clamp(0.0, 1.0);
-    final dy = (local.dy / safeHeight).clamp(0.0, 1.0);
-    return Offset(dx, dy);
+    return SketchStroke.normalizeOffset(local, size);
   }
 
   void _startStroke(DragStartDetails details, Size size) {
     final point = _normalizeOffset(details.localPosition, size);
     setState(() {
-      _activeStroke = _SketchStroke(
+      _activeStroke = SketchStroke(
         points: [point],
         colorValue: Colors.black.toARGB32(),
         width: _strokeWidth,
@@ -542,7 +539,7 @@ class _NoteSketchDialogState extends State<_NoteSketchDialog> {
 }
 
 class _SketchPainter extends CustomPainter {
-  final List<_SketchStroke> strokes;
+  final List<SketchStroke> strokes;
 
   const _SketchPainter({required this.strokes});
 
@@ -577,10 +574,10 @@ class _SketchPainter extends CustomPainter {
 
 class _NotePayload {
   final String text;
-  final List<_SketchStroke> strokes;
+  final List<SketchStroke> strokes;
 
-  _NotePayload({this.text = '', List<_SketchStroke>? strokes})
-    : strokes = strokes ?? <_SketchStroke>[];
+  _NotePayload({this.text = '', List<SketchStroke>? strokes})
+    : strokes = strokes ?? <SketchStroke>[];
 
   factory _NotePayload.fromMap(Map<String, dynamic> data) {
     return _NotePayload(
@@ -593,55 +590,11 @@ class _NotePayload {
     return strokes.map((stroke) => stroke.toMap()).toList();
   }
 
-  static List<_SketchStroke> _decodeStrokes(dynamic raw) {
-    if (raw is! List) return <_SketchStroke>[];
-    final decoded = <_SketchStroke>[];
-    for (final item in raw) {
-      if (item is! Map) continue;
-      final width = (item['width'] as num?)?.toDouble() ?? 2.2;
-      final colorValue =
-          (item['colorValue'] as num?)?.toInt() ?? Colors.black.toARGB32();
-      final pointsRaw = item['points'];
-      if (pointsRaw is! List) continue;
-      final points = <Offset>[];
-      for (final point in pointsRaw) {
-        if (point is! Map) continue;
-        final dx = (point['x'] as num?)?.toDouble() ?? 0;
-        final dy = (point['y'] as num?)?.toDouble() ?? 0;
-        points.add(Offset(dx.clamp(0.0, 1.0), dy.clamp(0.0, 1.0)));
-      }
-      if (points.isEmpty) continue;
-      decoded.add(
-        _SketchStroke(points: points, colorValue: colorValue, width: width),
-      );
-    }
-    return decoded;
-  }
-}
-
-class _SketchStroke {
-  final List<Offset> points;
-  final int colorValue;
-  final double width;
-
-  _SketchStroke({
-    required this.points,
-    required this.colorValue,
-    required this.width,
-  });
-
-  Map<String, dynamic> toMap() {
-    return {
-      'colorValue': colorValue,
-      'width': width,
-      'points': points
-          .map(
-            (point) => {
-              'x': point.dx.clamp(0.0, 1.0),
-              'y': point.dy.clamp(0.0, 1.0),
-            },
-          )
-          .toList(),
-    };
+  static List<SketchStroke> _decodeStrokes(dynamic raw) {
+    return SketchStroke.decodeList(
+      raw,
+      defaultWidth: 2.2,
+      defaultColorValue: Colors.black.toARGB32(),
+    );
   }
 }

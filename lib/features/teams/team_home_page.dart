@@ -67,44 +67,24 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
   ) async {
     final teamRef = firestore.collection('teams').doc(widget.teamId);
     final team = await teamRef.get().timeout(const Duration(seconds: 12));
-    var member = await teamRef
+    final member = await teamRef
         .collection('members')
         .doc(userId)
         .get()
         .timeout(const Duration(seconds: 12));
+    final globalAdmin = await firestore
+        .collection('globalAdmins')
+        .doc(userId)
+        .get()
+        .timeout(const Duration(seconds: 12));
     final createdBy = (team.data()?['createdBy'] ?? '').toString();
-    final memberRole = (member.data()?['role'] ?? '').toString().trim();
-    final creatorNeedsRepair =
-        team.exists &&
-        createdBy == userId &&
-        (!member.exists || teamRoleKey(memberRole) != 'admin');
-    if (creatorNeedsRepair) {
-      // Self-heal legacy teams where creator member doc was not written.
-      await teamRef.collection('members').doc(userId).set({
-        'userId': userId,
-        'uid': userId,
-        'email': ref
-            .read(firebaseAuthProvider)
-            .currentUser
-            ?.email
-            ?.toLowerCase(),
-        'displayName': ref.read(firebaseAuthProvider).currentUser?.displayName,
-        'nickname': null,
-        'role': 'admin',
-        'teamName': (team.data()?['name'] ?? '팀').toString(),
-        'capabilities': {'songEditor': true},
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-      member = await teamRef
-          .collection('members')
-          .doc(userId)
-          .get()
-          .timeout(const Duration(seconds: 12));
-      await teamRef.set({
-        'memberUids': FieldValue.arrayUnion([userId]),
-      }, SetOptions(merge: true));
-    }
-    return _TeamContext(team: team, member: member);
+    final isTeamCreator = team.exists && createdBy == userId;
+    return _TeamContext(
+      team: team,
+      member: member,
+      isTeamCreator: isTeamCreator,
+      isGlobalAdmin: globalAdmin.exists,
+    );
   }
 
   Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadProjects(
@@ -343,16 +323,8 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
     String userId,
   ) async {
     Future<void> deleteMembershipMirror(String teamId) async {
-      try {
-        await firestore
-            .collection('users')
-            .doc(userId)
-            .collection('teamMemberships')
-            .doc(teamId)
-            .delete();
-      } on FirebaseException {
-        // Best-effort cleanup only.
-      }
+      // Keep read path side-effect free. Mirror cleanup is handled by repair flow.
+      if (teamId.isEmpty) return;
     }
 
     final byId = <String, _TeamOption>{};
@@ -537,100 +509,29 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
     context.go('/teams/$selected');
   }
 
-  Future<void> _deleteCollectionDocs(
-    FirebaseFirestore firestore,
-    CollectionReference<Map<String, dynamic>> collection, {
-    int pageSize = 200,
+  Future<String> _enqueueDeleteRequest({
+    required FirebaseFirestore firestore,
+    required String requestedBy,
+    required String type,
+    String? projectId,
   }) async {
-    var retryCount = 0;
-    while (true) {
-      QuerySnapshot<Map<String, dynamic>> snapshot;
-      try {
-        snapshot = await collection.limit(pageSize).get();
-      } on FirebaseException catch (error) {
-        if (_isRetriableCleanupError(error) && retryCount < 2) {
-          retryCount += 1;
-          await Future<void>.delayed(Duration(milliseconds: 250 * retryCount));
-          continue;
-        }
-        rethrow;
-      }
-      if (snapshot.docs.isEmpty) return;
-      final batch = firestore.batch();
-      for (final doc in snapshot.docs) {
-        batch.delete(doc.reference);
-      }
-      try {
-        await batch.commit();
-      } on FirebaseException catch (error) {
-        if (_isRetriableCleanupError(error) && retryCount < 2) {
-          retryCount += 1;
-          await Future<void>.delayed(Duration(milliseconds: 250 * retryCount));
-          continue;
-        }
-        rethrow;
-      }
-      retryCount = 0;
-      if (snapshot.docs.length < pageSize) return;
+    final queueRef = firestore
+        .collection('teams')
+        .doc(widget.teamId)
+        .collection('deleteQueue')
+        .doc();
+    final payload = <String, Object?>{
+      'teamId': widget.teamId,
+      'requestedBy': requestedBy,
+      'type': type,
+      'status': 'queued',
+      'createdAt': FieldValue.serverTimestamp(),
+    };
+    if (projectId != null && projectId.trim().isNotEmpty) {
+      payload['projectId'] = projectId.trim();
     }
-  }
-
-  bool _isRetriableCleanupError(FirebaseException error) {
-    return isRetriableCleanupErrorCode(error.code);
-  }
-
-  bool _isSkippableCleanupError(FirebaseException error) {
-    return isSkippableCleanupErrorCode(error.code);
-  }
-
-  String _cleanupLabelPreview(
-    List<String> skippedSteps,
-    List<String> failedSteps, {
-    int maxItems = 3,
-  }) => cleanupLabelPreview(skippedSteps, failedSteps, maxItems: maxItems);
-
-  Future<void> _deletePrivateProjectNotesForTeam(
-    FirebaseFirestore firestore,
-    DocumentReference<Map<String, dynamic>> teamRef,
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> projectDocs,
-    List<QueryDocumentSnapshot<Map<String, dynamic>>> memberDocs,
-  ) async {
-    if (projectDocs.isEmpty || memberDocs.isEmpty) return;
-
-    final noteCollection = teamRef.collection('userProjectNotes');
-    var batch = firestore.batch();
-    var opCount = 0;
-
-    Future<void> flush() async {
-      if (opCount == 0) return;
-      await batch.commit();
-      batch = firestore.batch();
-      opCount = 0;
-    }
-
-    for (final projectDoc in projectDocs) {
-      final projectId = projectDoc.id;
-      for (final memberDoc in memberDocs) {
-        final userId = memberDoc.id;
-        final v2Ref = noteCollection.doc(
-          privateProjectNoteDocIdV2(projectId, userId),
-        );
-        batch.delete(v2Ref);
-        opCount += 1;
-
-        final legacyRef = noteCollection.doc(
-          privateProjectNoteDocIdLegacy(projectId, userId),
-        );
-        batch.delete(legacyRef);
-        opCount += 1;
-
-        if (opCount >= 400) {
-          await flush();
-        }
-      }
-    }
-
-    await flush();
+    await queueRef.set(payload);
+    return queueRef.id;
   }
 
   Future<void> _confirmAndDeleteTeam(
@@ -664,13 +565,10 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
 
     setState(() => _deletingTeam = true);
     final firestore = ref.read(firestoreProvider);
-    final teamRef = firestore.collection('teams').doc(widget.teamId);
     final providedNameKey = teamNameKey?.trim() ?? '';
     final resolvedNameKey = providedNameKey.isNotEmpty
         ? providedNameKey
         : buildTeamNameKey(teamName);
-    final skippedCleanupSteps = <String>[];
-    final failedCleanupSteps = <String>[];
     unawaited(
       logTeamOpsMetric(
         firestore: firestore,
@@ -684,185 +582,34 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
         },
       ),
     );
-    Future<void> safeCleanup(
-      String label,
-      Future<void> Function() action,
-    ) async {
-      try {
-        await action();
-      } on FirebaseException catch (error) {
-        if (_isSkippableCleanupError(error)) {
-          skippedCleanupSteps.add('$label(${error.code})');
-          return;
-        }
-        failedCleanupSteps.add('$label(${error.code})');
-      }
-    }
-
     try {
-      var membersDocs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-      await safeCleanup('members.read', () async {
-        final membersSnapshot = await teamRef.collection('members').get();
-        membersDocs = membersSnapshot.docs;
-      });
-      for (final memberDoc in membersDocs) {
-        try {
-          await firestore
-              .collection('users')
-              .doc(memberDoc.id)
-              .collection('teamMemberships')
-              .doc(widget.teamId)
-              .delete();
-        } on FirebaseException catch (error) {
-          if (_isSkippableCleanupError(error)) {
-            skippedCleanupSteps.add(
-              'users/${memberDoc.id}/teamMemberships.delete(${error.code})',
-            );
-          } else {
-            failedCleanupSteps.add(
-              'users/${memberDoc.id}/teamMemberships.delete(${error.code})',
-            );
-          }
-        }
-      }
-      // Ensure current actor mirror is also removed even when members query is stale.
-      try {
-        await firestore
-            .collection('users')
-            .doc(userId)
-            .collection('teamMemberships')
-            .doc(widget.teamId)
-            .delete();
-      } on FirebaseException catch (error) {
-        if (_isSkippableCleanupError(error)) {
-          skippedCleanupSteps.add(
-            'users/$userId/teamMemberships.delete(${error.code})',
-          );
-        } else {
-          failedCleanupSteps.add(
-            'users/$userId/teamMemberships.delete(${error.code})',
-          );
-        }
-      }
-
-      var projectsDocs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-      await safeCleanup('projects.read', () async {
-        final projectsSnapshot = await teamRef.collection('projects').get();
-        projectsDocs = projectsSnapshot.docs;
-      });
-
-      await safeCleanup(
-        'invites.deleteAll',
-        () => _deleteCollectionDocs(firestore, teamRef.collection('invites')),
+      final requestId = await _enqueueDeleteRequest(
+        firestore: firestore,
+        requestedBy: userId,
+        type: 'teamDelete',
       );
-      await safeCleanup(
-        'inviteLinks.deleteAll',
-        () =>
-            _deleteCollectionDocs(firestore, teamRef.collection('inviteLinks')),
-      );
-      await safeCleanup(
-        'songRefs.deleteAll',
-        () => _deleteCollectionDocs(firestore, teamRef.collection('songRefs')),
-      );
-      await safeCleanup(
-        'userProjectNotes.deleteAll',
-        () => _deletePrivateProjectNotesForTeam(
-          firestore,
-          teamRef,
-          projectsDocs,
-          membersDocs,
-        ),
-      );
-
-      for (final projectDoc in projectsDocs) {
-        await safeCleanup(
-          'projects/${projectDoc.id}/segmentA_setlist.deleteAll',
-          () => _deleteCollectionDocs(
-            firestore,
-            projectDoc.reference.collection('segmentA_setlist'),
-          ),
-        );
-        await safeCleanup(
-          'projects/${projectDoc.id}/segmentB_application.deleteAll',
-          () => _deleteCollectionDocs(
-            firestore,
-            projectDoc.reference.collection('segmentB_application'),
-          ),
-        );
-        await safeCleanup(
-          'projects/${projectDoc.id}/liveCue.deleteAll',
-          () => _deleteCollectionDocs(
-            firestore,
-            projectDoc.reference.collection('liveCue'),
-          ),
-        );
-        await safeCleanup(
-          'projects/${projectDoc.id}/sharedNotes.deleteAll',
-          () => _deleteCollectionDocs(
-            firestore,
-            projectDoc.reference.collection('sharedNotes'),
-          ),
-        );
-      }
-      await safeCleanup(
-        'projects.deleteAll',
-        () => _deleteCollectionDocs(firestore, teamRef.collection('projects')),
-      );
-      if (resolvedNameKey.isNotEmpty) {
-        try {
-          await firestore
-              .collection('teamNameIndex')
-              .doc(resolvedNameKey)
-              .delete();
-        } on FirebaseException catch (error) {
-          if (_isSkippableCleanupError(error)) {
-            skippedCleanupSteps.add('teamNameIndex.delete(${error.code})');
-          } else {
-            failedCleanupSteps.add('teamNameIndex.delete(${error.code})');
-          }
-        }
-      }
-
-      await teamRef.delete();
-      // Delete members last to keep admin permission checks valid during team doc delete.
-      await safeCleanup(
-        'members.deleteAll',
-        () => _deleteCollectionDocs(firestore, teamRef.collection('members')),
-      );
-
       unawaited(
         logTeamOpsMetric(
           firestore: firestore,
           teamId: widget.teamId,
           category: 'delete',
           action: 'team_delete',
-          status: 'success',
-          skippedCount: skippedCleanupSteps.length,
-          failedCount: failedCleanupSteps.length,
+          status: 'queued',
           extra: <String, Object?>{
-            'memberCount': membersDocs.length,
-            'projectCount': projectsDocs.length,
+            'requestId': requestId,
+            'teamName': teamName,
+            if (resolvedNameKey.isNotEmpty) 'teamNameKey': resolvedNameKey,
           },
         ),
       );
-
       if (!context.mounted) return;
-      final hasCleanupIssues =
-          skippedCleanupSteps.isNotEmpty || failedCleanupSteps.isNotEmpty;
-      final cleanupPreview = _cleanupLabelPreview(
-        skippedCleanupSteps,
-        failedCleanupSteps,
-      );
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            hasCleanupIssues
-                ? '팀을 삭제했습니다. 일부 정리 작업이 생략되었습니다: $cleanupPreview'
-                : '팀을 삭제했습니다.',
-          ),
+          content: Text('팀 삭제 요청이 접수되었습니다. 요청 ID: $requestId (상태: queued)'),
         ),
       );
       context.go('/teams');
+      return;
     } on FirebaseException catch (error) {
       unawaited(
         logTeamOpsMetric(
@@ -872,14 +619,16 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
           action: 'team_delete',
           status: 'failed',
           code: error.code,
-          skippedCount: skippedCleanupSteps.length,
-          failedCount: failedCleanupSteps.length,
+          extra: <String, Object?>{
+            'teamName': teamName,
+            if (resolvedNameKey.isNotEmpty) 'teamNameKey': resolvedNameKey,
+          },
         ),
       );
       if (!context.mounted) return;
       final message = error.code == 'permission-denied'
-          ? '팀 삭제 권한이 없습니다. Firestore Rules 게시 상태와 내 역할(팀장)을 확인해 주세요.'
-          : '팀 삭제 실패: ${error.message ?? error.code}';
+          ? '삭제 큐 요청 권한이 없습니다. 운영자에게 deleteQueue 권한 설정을 요청해 주세요.'
+          : '팀 삭제 큐 요청 실패: ${error.message ?? error.code}';
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
@@ -892,15 +641,13 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
           action: 'team_delete',
           status: 'failed',
           code: 'unknown',
-          skippedCount: skippedCleanupSteps.length,
-          failedCount: failedCleanupSteps.length,
           extra: <String, Object?>{'error': error.toString()},
         ),
       );
       if (!context.mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('팀 삭제 실패: $error')));
+      ).showSnackBar(SnackBar(content: Text('팀 삭제 큐 요청 실패: $error')));
     } finally {
       if (mounted) {
         setState(() => _deletingTeam = false);
@@ -938,13 +685,6 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
 
     setState(() => _deletingProjectIds.add(projectId));
     final firestore = ref.read(firestoreProvider);
-    final projectRef = firestore
-        .collection('teams')
-        .doc(widget.teamId)
-        .collection('projects')
-        .doc(projectId);
-    final skippedCleanupSteps = <String>[];
-    final failedCleanupSteps = <String>[];
     unawaited(
       logTeamOpsMetric(
         firestore: firestore,
@@ -955,103 +695,84 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
         extra: <String, Object?>{'projectId': projectId},
       ),
     );
-
-    Future<void> safeCleanup(
-      String label,
-      Future<void> Function() action,
-    ) async {
-      try {
-        await action();
-      } on FirebaseException catch (error) {
-        if (_isSkippableCleanupError(error)) {
-          skippedCleanupSteps.add('$label(${error.code})');
-          return;
-        }
-        failedCleanupSteps.add('$label(${error.code})');
-      }
-    }
-
+    final currentUserId = ref.read(firebaseAuthProvider).currentUser?.uid ?? '';
     try {
-      await safeCleanup(
-        'segmentA_setlist.deleteAll',
-        () => _deleteCollectionDocs(
-          firestore,
-          projectRef.collection('segmentA_setlist'),
-        ),
-      );
-      await safeCleanup(
-        'segmentB_application.deleteAll',
-        () => _deleteCollectionDocs(
-          firestore,
-          projectRef.collection('segmentB_application'),
-        ),
-      );
-      await safeCleanup(
-        'liveCue.deleteAll',
-        () =>
-            _deleteCollectionDocs(firestore, projectRef.collection('liveCue')),
-      );
-      await safeCleanup(
-        'sharedNotes.deleteAll',
-        () => _deleteCollectionDocs(
-          firestore,
-          projectRef.collection('sharedNotes'),
-        ),
-      );
-      await projectRef.delete();
-
-      unawaited(
-        logTeamOpsMetric(
-          firestore: firestore,
-          teamId: widget.teamId,
-          category: 'delete',
-          action: 'project_delete',
-          status: 'success',
-          skippedCount: skippedCleanupSteps.length,
-          failedCount: failedCleanupSteps.length,
-          extra: <String, Object?>{'projectId': projectId},
-        ),
-      );
-
-      if (!context.mounted) return;
-      final hasCleanupIssues =
-          skippedCleanupSteps.isNotEmpty || failedCleanupSteps.isNotEmpty;
-      final cleanupPreview = _cleanupLabelPreview(
-        skippedCleanupSteps,
-        failedCleanupSteps,
-      );
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            hasCleanupIssues
-                ? '프로젝트를 삭제했습니다. 일부 정리 작업이 생략되었습니다: $cleanupPreview'
-                : '프로젝트를 삭제했습니다.',
-          ),
-        ),
-      );
-      _refreshPageState();
-    } catch (error) {
-      final code = error is FirebaseException ? error.code : 'unknown';
-      unawaited(
-        logTeamOpsMetric(
-          firestore: firestore,
-          teamId: widget.teamId,
-          category: 'delete',
-          action: 'project_delete',
-          status: 'failed',
-          code: code,
-          skippedCount: skippedCleanupSteps.length,
-          failedCount: failedCleanupSteps.length,
-          extra: <String, Object?>{
-            'projectId': projectId,
-            if (code == 'unknown') 'error': error.toString(),
-          },
-        ),
-      );
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('프로젝트 삭제 실패: $error')));
+      if (currentUserId.isNotEmpty) {
+        try {
+          final requestId = await _enqueueDeleteRequest(
+            firestore: firestore,
+            requestedBy: currentUserId,
+            type: 'projectDelete',
+            projectId: projectId,
+          );
+          unawaited(
+            logTeamOpsMetric(
+              firestore: firestore,
+              teamId: widget.teamId,
+              category: 'delete',
+              action: 'project_delete',
+              status: 'queued',
+              extra: <String, Object?>{
+                'projectId': projectId,
+                'requestId': requestId,
+              },
+            ),
+          );
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '프로젝트 삭제 요청이 접수되었습니다. 요청 ID: $requestId (상태: queued)',
+              ),
+            ),
+          );
+          _refreshPageState();
+          return;
+        } on FirebaseException catch (error) {
+          unawaited(
+            logTeamOpsMetric(
+              firestore: firestore,
+              teamId: widget.teamId,
+              category: 'delete',
+              action: 'project_delete',
+              status: 'failed',
+              code: error.code,
+              extra: <String, Object?>{'projectId': projectId},
+            ),
+          );
+          if (!context.mounted) return;
+          final message = error.code == 'permission-denied'
+              ? '삭제 큐 요청 권한이 없습니다. 운영자에게 deleteQueue 권한 설정을 요청해 주세요.'
+              : '프로젝트 삭제 큐 요청 실패: ${error.message ?? error.code}';
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(message)));
+        } catch (error) {
+          unawaited(
+            logTeamOpsMetric(
+              firestore: firestore,
+              teamId: widget.teamId,
+              category: 'delete',
+              action: 'project_delete',
+              status: 'failed',
+              code: 'unknown',
+              extra: <String, Object?>{
+                'projectId': projectId,
+                'error': error.toString(),
+              },
+            ),
+          );
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('프로젝트 삭제 큐 요청 실패: $error')));
+        }
+      } else {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('로그인 정보가 없어 삭제 큐 요청을 생성할 수 없습니다.')),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _deletingProjectIds.remove(projectId));
@@ -1145,7 +866,9 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
               ),
             );
           }
-          if (!contextData.member.exists) {
+          if (!contextData.member.exists &&
+              !contextData.isTeamCreator &&
+              !contextData.isGlobalAdmin) {
             return AppContentFrame(
               child: AppStateCard(
                 icon: Icons.lock_outline_rounded,
@@ -1165,10 +888,14 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
               .trim();
           final membersFuture = _membersFuture ??= _loadMembers(firestore);
           final projectsFuture = _projectsFuture ??= _loadProjects(firestore);
-          final currentUserRole = teamRoleKey(
-            contextData.member.data()?['role']?.toString(),
-          );
+          final currentUserRole = contextData.isTeamCreator
+              ? 'admin'
+              : teamRoleKey(contextData.member.data()?['role']?.toString());
           final isAdmin = currentUserRole == 'admin';
+          final isGlobalAdminReadOnlyContext =
+              contextData.isGlobalAdmin &&
+              !contextData.member.exists &&
+              !contextData.isTeamCreator;
 
           final roleManagementSection = AppSectionCard(
             icon: Icons.admin_panel_settings_rounded,
@@ -1383,6 +1110,8 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
                         title: syncing ? '프로젝트 동기화 중...' : '아직 프로젝트가 없습니다',
                         message: syncing
                             ? '잠시 후 자동으로 갱신됩니다. 오래 지속되면 새로고침을 눌러 주세요.'
+                            : isGlobalAdminReadOnlyContext
+                            ? '운영자 권한으로 팀 홈을 조회 중입니다. 이 팀 프로젝트는 팀 멤버 권한이 있어야 목록 조회가 가능합니다.'
                             : (isAdmin
                                   ? '프로젝트 생성 버튼으로 첫 프로젝트를 만들어 주세요.'
                                   : '팀장이 프로젝트를 생성하면 여기에서 바로 진입할 수 있습니다.'),
@@ -1618,47 +1347,39 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
               builder: (context, constraints) {
                 final wide = constraints.maxWidth >= 1180;
                 final metricCards = [
-                  Expanded(
-                    child:
-                        FutureBuilder<
-                          List<QueryDocumentSnapshot<Map<String, dynamic>>>
-                        >(
-                          future: membersFuture,
-                          builder: (context, snapshot) {
-                            final count = snapshot.data?.length;
-                            return _MetricCard(
-                              icon: Icons.groups_3_rounded,
-                              title: '팀원',
-                              value: count == null ? '-' : '$count명',
-                              helper: '현재 팀 참여 인원',
-                            );
-                          },
-                        ),
+                  FutureBuilder<
+                    List<QueryDocumentSnapshot<Map<String, dynamic>>>
+                  >(
+                    future: membersFuture,
+                    builder: (context, snapshot) {
+                      final count = snapshot.data?.length;
+                      return _MetricCard(
+                        icon: Icons.groups_3_rounded,
+                        title: '팀원',
+                        value: count == null ? '-' : '$count명',
+                        helper: '현재 팀 참여 인원',
+                      );
+                    },
                   ),
-                  Expanded(
-                    child:
-                        FutureBuilder<
-                          List<QueryDocumentSnapshot<Map<String, dynamic>>>
-                        >(
-                          future: projectsFuture,
-                          builder: (context, snapshot) {
-                            final count = snapshot.data?.length;
-                            return _MetricCard(
-                              icon: Icons.event_note_rounded,
-                              title: '프로젝트',
-                              value: count == null ? '-' : '$count개',
-                              helper: '예배 날짜 단위 운영',
-                            );
-                          },
-                        ),
+                  FutureBuilder<
+                    List<QueryDocumentSnapshot<Map<String, dynamic>>>
+                  >(
+                    future: projectsFuture,
+                    builder: (context, snapshot) {
+                      final count = snapshot.data?.length;
+                      return _MetricCard(
+                        icon: Icons.event_note_rounded,
+                        title: '프로젝트',
+                        value: count == null ? '-' : '$count개',
+                        helper: '예배 날짜 단위 운영',
+                      );
+                    },
                   ),
-                  Expanded(
-                    child: _MetricCard(
-                      icon: Icons.verified_user_rounded,
-                      title: '내 역할',
-                      value: teamRoleLabel(currentUserRole),
-                      helper: isAdmin ? '권한/멤버 관리 가능' : '프로젝트 참여',
-                    ),
+                  _MetricCard(
+                    icon: Icons.verified_user_rounded,
+                    title: '내 역할',
+                    value: teamRoleLabel(currentUserRole),
+                    helper: isAdmin ? '권한/멤버 관리 가능' : '프로젝트 참여',
                   ),
                 ];
 
@@ -1696,15 +1417,24 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
                       ],
                     ),
                     const SizedBox(height: 16),
+                    if (isGlobalAdminReadOnlyContext) ...[
+                      const AppStateCard(
+                        icon: Icons.shield_outlined,
+                        title: '운영자 조회 모드',
+                        message:
+                            '현재 계정은 글로벌 운영자 권한으로 팀 홈에 진입했습니다. 프로젝트/세부 데이터는 팀 멤버 권한이 있어야 조회될 수 있습니다.',
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                     if (wide)
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          metricCards[0],
+                          Expanded(child: metricCards[0]),
                           const SizedBox(width: 10),
-                          metricCards[1],
+                          Expanded(child: metricCards[1]),
                           const SizedBox(width: 10),
-                          metricCards[2],
+                          Expanded(child: metricCards[2]),
                         ],
                       )
                     else
@@ -2169,8 +1899,15 @@ class _MetricCard extends StatelessWidget {
 class _TeamContext {
   final DocumentSnapshot<Map<String, dynamic>> team;
   final DocumentSnapshot<Map<String, dynamic>> member;
+  final bool isTeamCreator;
+  final bool isGlobalAdmin;
 
-  const _TeamContext({required this.team, required this.member});
+  const _TeamContext({
+    required this.team,
+    required this.member,
+    required this.isTeamCreator,
+    required this.isGlobalAdmin,
+  });
 }
 
 class _TeamOption {

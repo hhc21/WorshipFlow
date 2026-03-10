@@ -1,5 +1,8 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:ui' show PointerDeviceKind;
 
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
@@ -11,12 +14,16 @@ import 'package:go_router/go_router.dart';
 import '../../app/ui_components.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
-import '../../services/ops_metrics.dart';
 import '../../services/song_search.dart';
 import '../../utils/browser_helpers.dart';
-import '../../utils/firestore_id.dart';
 import '../../utils/song_parser.dart';
 import '../../utils/storage_helpers.dart';
+import 'live_cue_note_persistence_adapter.dart';
+import 'models/sketch_stroke.dart';
+import 'live_cue_stroke_engine.dart';
+import 'live_cue_sync_coordinator.dart';
+import 'next_viewer_contract.dart';
+import 'next_viewer_host.dart';
 
 DocumentReference<Map<String, dynamic>> _liveCueRefFor(
   FirebaseFirestore firestore,
@@ -43,33 +50,6 @@ CollectionReference<Map<String, dynamic>> _setlistRefFor(
       .collection('projects')
       .doc(projectId)
       .collection('segmentA_setlist');
-}
-
-DocumentReference<Map<String, dynamic>> _privateProjectNoteRefFor(
-  FirebaseFirestore firestore,
-  String teamId,
-  String projectId,
-  String userId,
-) {
-  return firestore
-      .collection('teams')
-      .doc(teamId)
-      .collection('userProjectNotes')
-      .doc(privateProjectNoteDocIdV2(projectId, userId));
-}
-
-DocumentReference<Map<String, dynamic>> _sharedProjectNoteRefFor(
-  FirebaseFirestore firestore,
-  String teamId,
-  String projectId,
-) {
-  return firestore
-      .collection('teams')
-      .doc(teamId)
-      .collection('projects')
-      .doc(projectId)
-      .collection('sharedNotes')
-      .doc('main');
 }
 
 bool _hasCueValue(Map<String, dynamic> cueData, String prefix) {
@@ -131,8 +111,36 @@ const List<int> _liveCueDrawingPalette = <int>[
   0xFFFFFFFF,
 ];
 
-const Duration _webSetlistPollInterval = Duration(milliseconds: 3500);
-const Duration _webCuePollInterval = Duration(milliseconds: 1000);
+const String _nextViewerUrl = String.fromEnvironment(
+  'WF_NEXT_VIEWER_URL',
+  defaultValue: '',
+);
+const String _nextViewerReadbackMode = String.fromEnvironment(
+  'WF_NEXT_WILL_READ_FREQUENTLY',
+  defaultValue: 'enabled',
+);
+const int _liveCueImageCacheMaxEntries = 120;
+const int _liveCueImageCacheMaxBytes = 80 * 1024 * 1024;
+
+void _traceLiveCueSync(
+  String scope,
+  String event, {
+  int? generation,
+  int? sequence,
+  String? detail,
+}) {
+  final buffer = StringBuffer('[LiveCueSync][$scope] $event');
+  if (generation != null) {
+    buffer.write(' generation=$generation');
+  }
+  if (sequence != null) {
+    buffer.write(' seq=$sequence');
+  }
+  if (detail != null && detail.isNotEmpty) {
+    buffer.write(' detail=$detail');
+  }
+  debugPrint(buffer.toString());
+}
 
 Future<SongCandidate?> _matchSongAutomatically(
   FirebaseFirestore firestore,
@@ -278,39 +286,6 @@ Future<Map<String, dynamic>> _cueFieldsFromSetlist(
     '${prefix}KeyText': keyText,
     '${prefix}CueLabel': normalizedLabel,
   };
-}
-
-int _findCurrentIndex(
-  List<QueryDocumentSnapshot<Map<String, dynamic>>> items,
-  Map<String, dynamic> liveCueData,
-) {
-  final currentSongId =
-      liveCueData['currentSongId']?.toString().trim().toLowerCase() ?? '';
-  final currentTitle =
-      (liveCueData['currentDisplayTitle'] ??
-              liveCueData['currentFreeTextTitle'] ??
-              '')
-          .toString()
-          .trim()
-          .toLowerCase();
-
-  for (var i = 0; i < items.length; i++) {
-    final data = items[i].data();
-    final songId = data['songId']?.toString().trim().toLowerCase() ?? '';
-    if (currentSongId.isNotEmpty &&
-        songId.isNotEmpty &&
-        currentSongId == songId) {
-      return i;
-    }
-    final title = (data['displayTitle'] ?? data['freeTextTitle'] ?? '')
-        .toString()
-        .trim()
-        .toLowerCase();
-    if (currentTitle.isNotEmpty && title == currentTitle) {
-      return i;
-    }
-  }
-  return -1;
 }
 
 Future<_LiveCueAssetPreview?> _loadCurrentPreview(
@@ -487,6 +462,7 @@ class LiveCuePage extends ConsumerStatefulWidget {
 class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   final FocusNode _focusNode = FocusNode();
   final Map<String, Future<List<String>>> _songKeysFutureCache = {};
+  late final LiveCueSyncCoordinator _syncCoordinator;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _latestSetlist =
       <QueryDocumentSnapshot<Map<String, dynamic>>>[];
   Map<String, dynamic> _latestCueData = const <String, dynamic>{};
@@ -494,7 +470,21 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   bool _saving = false;
 
   @override
+  void initState() {
+    super.initState();
+    _syncCoordinator = LiveCueSyncCoordinator(
+      scope: 'operator',
+      teamId: widget.teamId,
+      projectId: widget.projectId,
+      isWeb: kIsWeb,
+      isMounted: () => mounted,
+      traceLogger: _traceLiveCueSync,
+    );
+  }
+
+  @override
   void dispose() {
+    unawaited(_syncCoordinator.dispose());
     _focusNode.dispose();
     super.dispose();
   }
@@ -503,6 +493,10 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
     FirebaseFirestore firestore,
     String songId,
   ) {
+    if (!_songKeysFutureCache.containsKey(songId) &&
+        _songKeysFutureCache.length >= 96) {
+      _songKeysFutureCache.clear();
+    }
     return _songKeysFutureCache.putIfAbsent(
       songId,
       () => _loadAvailableKeysForSong(firestore, songId),
@@ -617,7 +611,12 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
 
     setState(() => _saving = true);
     try {
-      var index = _findCurrentIndex(items, cueData);
+      var index = LiveCueResolvedState.findCurrentIndex(
+        items: items,
+        cueData: cueData,
+        cueLabelFromItem: _cueLabelFromItem,
+        normalizeKeyText: normalizeKeyText,
+      );
       if (index < 0) index = 0;
       final nextIndex = (index + step).clamp(0, items.length - 1);
       await _applySetlistAsCurrent(
@@ -675,6 +674,13 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
       widget.teamId,
       widget.projectId,
     );
+    final setlistQuery = setlistRef.orderBy('order');
+    final syncStreams = _syncCoordinator.attach(
+      setlistQuery: setlistQuery,
+      liveCueRef: liveCueRef,
+    );
+    final setlistStream = syncStreams.setlist;
+    final cueStream = syncStreams.cue;
 
     return Focus(
       focusNode: _focusNode,
@@ -735,7 +741,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
             const SizedBox(height: 12),
             Expanded(
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-                stream: setlistRef.orderBy('order').snapshots(),
+                stream: setlistStream,
                 builder: (context, setlistSnapshot) {
                   if (setlistSnapshot.connectionState ==
                       ConnectionState.waiting) {
@@ -755,7 +761,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                   _latestSetlist = items;
 
                   return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                    stream: liveCueRef.snapshots(),
+                    stream: cueStream,
                     builder: (context, cueSnapshot) {
                       if (cueSnapshot.connectionState ==
                           ConnectionState.waiting) {
@@ -785,49 +791,22 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                         });
                       }
 
-                      var currentIndex = _findCurrentIndex(items, cueData);
-                      if (currentIndex < 0 && items.isNotEmpty) {
-                        currentIndex = 0;
-                      }
-
-                      final currentLabel =
-                          cueData['currentCueLabel']?.toString() ??
-                          (currentIndex >= 0 && currentIndex < items.length
-                              ? _cueLabelFromItem(
-                                  items[currentIndex].data(),
-                                  currentIndex + 1,
-                                )
-                              : '현재');
-                      final currentTitle =
-                          cueData['currentDisplayTitle']?.toString() ??
-                          cueData['currentFreeTextTitle']?.toString() ??
-                          (currentIndex >= 0 && currentIndex < items.length
-                              ? _titleFromItem(items[currentIndex].data())
-                              : '현재 곡 없음');
-                      final currentKey = cueData['currentKeyText']?.toString();
-
-                      final nextIndex =
-                          currentIndex >= 0 && currentIndex + 1 < items.length
-                          ? currentIndex + 1
-                          : -1;
-                      final nextLabel =
-                          cueData['nextCueLabel']?.toString() ??
-                          (nextIndex >= 0
-                              ? _cueLabelFromItem(
-                                  items[nextIndex].data(),
-                                  nextIndex + 1,
-                                )
-                              : '다음');
-                      final nextTitle =
-                          cueData['nextDisplayTitle']?.toString() ??
-                          cueData['nextFreeTextTitle']?.toString() ??
-                          (nextIndex >= 0
-                              ? _titleFromItem(items[nextIndex].data())
-                              : '다음 곡 없음');
-                      final nextKey = cueData['nextKeyText']?.toString();
-
-                      final currentSongId = cueData['currentSongId']
-                          ?.toString();
+                      final syncState = LiveCueResolvedState.resolve(
+                        items: items,
+                        cueData: cueData,
+                        cueLabelFromItem: _cueLabelFromItem,
+                        titleFromItem: _titleFromItem,
+                        keyFromItem: _keyFromItem,
+                        normalizeKeyText: normalizeKeyText,
+                      );
+                      final currentIndex = syncState.currentIndex;
+                      final currentSongId = syncState.currentSongId;
+                      final currentTitle = syncState.currentTitle;
+                      final currentKey = syncState.currentKey;
+                      final currentLabel = syncState.currentLabel;
+                      final nextTitle = syncState.nextTitle;
+                      final nextKey = syncState.nextKey;
+                      final nextLabel = syncState.nextLabel;
 
                       return GestureDetector(
                         behavior: HitTestBehavior.opaque,
@@ -1142,79 +1121,306 @@ class LiveCueFullScreenPage extends ConsumerStatefulWidget {
       _LiveCueFullScreenPageState();
 }
 
-class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
+class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
+    with WidgetsBindingObserver {
   final FocusNode _focusNode = FocusNode();
-  final TransformationController _viewerController = TransformationController();
-  final ValueNotifier<int> _strokeRevision = ValueNotifier<int>(0);
-  final Map<String, Future<_LiveCueAssetPreview?>> _previewCache = {};
-  final Map<String, _LiveCueAssetPreview> _resolvedPreviewCache = {};
-  final Set<String> _prefetchedPreviewKeys = <String>{};
-  final Set<String> _queuedPrefetchKeys = <String>{};
+  late final LiveCueStrokeEngine _strokeEngine;
+  late final _LiveCueRenderPresenter _renderPresenter;
   final Map<String, Future<List<String>>> _songKeysFutureCache = {};
-  String? _webPollingScopeKey;
-  Stream<QuerySnapshot<Map<String, dynamic>>>? _webSetlistStream;
-  Stream<DocumentSnapshot<Map<String, dynamic>>>? _webCueStream;
+  late final LiveCueSyncCoordinator _syncCoordinator;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _latestSetlist =
       <QueryDocumentSnapshot<Map<String, dynamic>>>[];
   Map<String, dynamic> _latestCueData = const <String, dynamic>{};
-  String? _activeViewerAssetKey;
-  String? _activeImageRendererKey;
-  bool _fallbackToHtmlImageElement = false;
-  bool _switchingImageRenderer = false;
   bool _autoSeeding = false;
   bool _moving = false;
-  bool _showOverlay = true;
-  Timer? _overlayTimer;
-  bool _drawingEnabled = false;
-  bool _eraserEnabled = false;
-  bool _editingSharedLayer = false;
-  bool _showPrivateLayer = true;
-  bool _showSharedLayer = true;
   bool _loadingNoteLayers = false;
   bool _savingNoteLayers = false;
   bool _noteLayersLoaded = false;
   String? _noteLayersKey;
-  double _drawingStrokeWidth = 2.8;
-  int _drawingColorValue = 0xFFD32F2F;
+  Future<_LiveCueContext>? _contextFuture;
+  String? _contextFutureUserId;
+  String? _lastWarmPreviewSignature;
+  bool _nextViewerDirty = false;
+  int _nextViewerSyncRevision = 0;
+  String? _nextViewerStatus;
+  String? _viewerIdToken;
+  String? _viewerTokenUserId;
+  bool _refreshingViewerIdToken = false;
+  Timer? _viewerIdTokenRefreshTimer;
+  StreamSubscription<User?>? _viewerAuthSubscription;
   String _privateNoteContent = '';
   String _sharedNoteContent = '';
-  List<_LiveCueSketchStroke> _privateLayerStrokes = <_LiveCueSketchStroke>[];
-  List<_LiveCueSketchStroke> _sharedLayerStrokes = <_LiveCueSketchStroke>[];
-  _LiveCueSketchStroke? _activeLayerStroke;
+  int? _activeDrawingPointer;
+  bool _showDrawingToolPanel = false;
+  final ValueNotifier<int> _viewerRevision = ValueNotifier<int>(0);
+  final ValueNotifier<int> _overlayRevision = ValueNotifier<int>(0);
+  int? _previousImageCacheMaxEntries;
+  int? _previousImageCacheMaxBytes;
+  Size _lastViewPhysicalSize = Size.zero;
+
+  TransformationController get _viewerController =>
+      _renderPresenter.viewerController;
+  ValueNotifier<int> get _strokeRevision => _strokeEngine.strokeRevision;
+  ValueNotifier<int> get _toolRevision => _strokeEngine.toolRevision;
+  bool get _drawingEnabled => _strokeEngine.drawingEnabled;
+  bool get _eraserEnabled => _strokeEngine.eraserEnabled;
+  bool get _editingSharedLayer => _strokeEngine.editingSharedLayer;
+  bool get _showPrivateLayer => _strokeEngine.showPrivateLayer;
+  bool get _showSharedLayer => _strokeEngine.showSharedLayer;
+  double get _drawingStrokeWidth => _strokeEngine.drawingStrokeWidth;
+  int get _drawingColorValue => _strokeEngine.drawingColorValue;
+  List<SketchStroke> get _privateLayerStrokes =>
+      _strokeEngine.privateLayerStrokes;
+  List<SketchStroke> get _sharedLayerStrokes =>
+      _strokeEngine.sharedLayerStrokes;
+  bool get _showOverlay => _renderPresenter.showOverlay;
+  set _showOverlay(bool value) => _renderPresenter.showOverlay = value;
+  bool get _useNextViewer => _renderPresenter.useNextViewer;
+  set _useNextViewer(bool value) => _renderPresenter.useNextViewer = value;
+  bool get _fallbackToHtmlImageElement =>
+      _renderPresenter.fallbackToHtmlImageElement;
+
+  Size _primaryViewPhysicalSize() {
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    if (views.isEmpty) return Size.zero;
+    return views.first.physicalSize;
+  }
+
+  void _configureImageCacheBudget() {
+    final imageCache = PaintingBinding.instance.imageCache;
+    _previousImageCacheMaxEntries ??= imageCache.maximumSize;
+    _previousImageCacheMaxBytes ??= imageCache.maximumSizeBytes;
+    if (imageCache.maximumSize > _liveCueImageCacheMaxEntries) {
+      imageCache.maximumSize = _liveCueImageCacheMaxEntries;
+    }
+    if (imageCache.maximumSizeBytes > _liveCueImageCacheMaxBytes) {
+      imageCache.maximumSizeBytes = _liveCueImageCacheMaxBytes;
+    }
+  }
+
+  void _restoreImageCacheBudget() {
+    final imageCache = PaintingBinding.instance.imageCache;
+    if (_previousImageCacheMaxEntries != null) {
+      imageCache.maximumSize = _previousImageCacheMaxEntries!;
+    }
+    if (_previousImageCacheMaxBytes != null) {
+      imageCache.maximumSizeBytes = _previousImageCacheMaxBytes!;
+    }
+  }
+
+  bool _supportsDrawingPointer(PointerDeviceKind kind) {
+    return kind == PointerDeviceKind.touch ||
+        kind == PointerDeviceKind.stylus ||
+        kind == PointerDeviceKind.invertedStylus ||
+        kind == PointerDeviceKind.unknown;
+  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _lastViewPhysicalSize = _primaryViewPhysicalSize();
+    _configureImageCacheBudget();
+    _strokeEngine = LiveCueStrokeEngine();
+    _renderPresenter = _LiveCueRenderPresenter(
+      isWeb: kIsWeb,
+      initialUseNextViewer: kIsWeb && _nextViewerUrl.trim().isNotEmpty,
+    );
+    _syncCoordinator = LiveCueSyncCoordinator(
+      scope: 'fullscreen',
+      teamId: widget.teamId,
+      projectId: widget.projectId,
+      isWeb: kIsWeb,
+      isMounted: () => mounted,
+      traceLogger: _traceLiveCueSync,
+    );
     if (widget.startInDrawMode) {
-      _drawingEnabled = true;
+      _strokeEngine.setDrawingEnabled(true);
       _showOverlay = true;
     }
+    final auth = ref.read(firebaseAuthProvider);
+    final user = auth.currentUser;
+    if (user != null) {
+      final firestore = ref.read(firestoreProvider);
+      _contextFutureUserId = user.uid;
+      _contextFuture = _loadContext(firestore, user.uid);
+    }
+    _startViewerAuthSync();
     _scheduleOverlayAutoHide();
   }
 
   @override
+  void didChangeMetrics() {
+    final nextPhysicalSize = _primaryViewPhysicalSize();
+    if (nextPhysicalSize == _lastViewPhysicalSize) return;
+    _lastViewPhysicalSize = nextPhysicalSize;
+    _lastWarmPreviewSignature = null;
+    _activeDrawingPointer = null;
+    _showOverlay = true;
+    _renderPresenter.viewerController.value = Matrix4.identity();
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
+    if (!_drawingEnabled) {
+      _scheduleOverlayAutoHide();
+    }
+  }
+
+  @override
   void dispose() {
-    _overlayTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    unawaited(_syncCoordinator.dispose());
+    _viewerAuthSubscription?.cancel();
+    _viewerIdTokenRefreshTimer?.cancel();
+    _restoreImageCacheBudget();
+    _viewerRevision.dispose();
+    _overlayRevision.dispose();
+    _renderPresenter.dispose();
     _focusNode.dispose();
-    _viewerController.dispose();
-    _strokeRevision.dispose();
+    _strokeEngine.dispose();
     super.dispose();
+  }
+
+  bool get _nextViewerWillReadFrequently =>
+      _nextViewerReadbackMode.trim().toLowerCase() != 'disabled';
+
+  void _startViewerAuthSync() {
+    if (!_useNextViewer) return;
+    final auth = ref.read(firebaseAuthProvider);
+    _syncViewerTokenOwner(auth.currentUser);
+    _viewerAuthSubscription?.cancel();
+    _viewerAuthSubscription = auth.idTokenChanges().listen((user) {
+      if (!mounted) return;
+      _syncViewerTokenOwner(user);
+    });
+  }
+
+  void _stopViewerAuthSync() {
+    _viewerAuthSubscription?.cancel();
+    _viewerAuthSubscription = null;
+    _viewerIdTokenRefreshTimer?.cancel();
+    _viewerIdTokenRefreshTimer = null;
+    _viewerTokenUserId = null;
+    _viewerIdToken = null;
+  }
+
+  void _syncViewerTokenOwner(User? user) {
+    if (!_useNextViewer) {
+      _stopViewerAuthSync();
+      return;
+    }
+    if (user == null) {
+      _viewerTokenUserId = null;
+      _viewerIdToken = null;
+      _viewerIdTokenRefreshTimer?.cancel();
+      _viewerIdTokenRefreshTimer = null;
+      return;
+    }
+    if (_viewerTokenUserId != user.uid) {
+      _viewerTokenUserId = user.uid;
+      _viewerIdToken = null;
+      _viewerIdTokenRefreshTimer?.cancel();
+      _viewerIdTokenRefreshTimer = Timer.periodic(
+        const Duration(minutes: 40),
+        (_) => unawaited(_refreshViewerIdToken(user, forceRefresh: true)),
+      );
+      unawaited(_refreshViewerIdToken(user, forceRefresh: true));
+      return;
+    }
+    if (_viewerIdToken == null && !_refreshingViewerIdToken) {
+      unawaited(_refreshViewerIdToken(user));
+    }
+  }
+
+  Future<void> _refreshViewerIdToken(
+    User user, {
+    bool forceRefresh = false,
+  }) async {
+    if (!_useNextViewer) return;
+    if (_refreshingViewerIdToken) return;
+    _refreshingViewerIdToken = true;
+    try {
+      final token = await user.getIdToken(forceRefresh);
+      if (!mounted || token == null || token.isEmpty) return;
+      if (_viewerIdToken == token) return;
+      _viewerIdToken = token;
+      _markViewerNeedsBuild();
+    } finally {
+      _refreshingViewerIdToken = false;
+    }
+  }
+
+  void _onNextViewerInkCommit(NextViewerInkState state) {
+    if (!mounted) return;
+    _strokeEngine.applyViewerCommit(
+      privateStrokes: state.privateStrokes,
+      sharedStrokes: state.sharedStrokes,
+      editingSharedLayer: state.editingSharedLayer,
+    );
+    _nextViewerDirty = true;
+    _markOverlayNeedsBuild();
+  }
+
+  void _onNextViewerDirtyChanged(bool dirty) {
+    if (!mounted) return;
+    if (_nextViewerDirty == dirty) return;
+    _nextViewerDirty = dirty;
+    _markOverlayNeedsBuild();
+  }
+
+  void _onNextViewerAssetError(NextViewerAssetError error) {
+    if (!mounted) return;
+    if (!_useNextViewer) return;
+    _useNextViewer = false;
+    _nextViewerStatus = '${error.code}: ${error.message}';
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
+    _stopViewerAuthSync();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Next.js 뷰어 자산 로드 실패(${error.code})로 기본 렌더러로 전환합니다.'),
+      ),
+    );
+  }
+
+  void _onNextViewerProtocolLog(String message) {
+    if (_nextViewerStatus == message) return;
+    if (!mounted) return;
+    _nextViewerStatus = message;
+    _markOverlayNeedsBuild();
+  }
+
+  Future<void> _handleBackNavigation() async {
+    if (!_nextViewerDirty) {
+      if (mounted) Navigator.of(context).pop();
+      return;
+    }
+    final shouldLeave = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('미저장 필기 감지'),
+        content: const Text('저장되지 않은 필기가 있습니다. 저장하지 않고 나가시겠습니까?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('나가기'),
+          ),
+        ],
+      ),
+    );
+    if (shouldLeave == true && mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   String _previewCacheKey(
     String songId,
     String? keyText,
     String? fallbackTitle,
-  ) {
-    final normalized = (keyText == null || keyText.trim().isEmpty)
-        ? '-'
-        : normalizeKeyText(keyText);
-    final normalizedFallback =
-        (fallbackTitle == null || fallbackTitle.trim().isEmpty)
-        ? '-'
-        : normalizeQuery(fallbackTitle);
-    return '$songId::$normalized::$normalizedFallback';
-  }
+  ) => _renderPresenter.previewCacheKey(songId, keyText, fallbackTitle);
 
   Future<_LiveCueAssetPreview?> _loadPreviewCached(
     FirebaseFirestore firestore,
@@ -1222,60 +1428,39 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     String? songId,
     String? keyText,
     String? fallbackTitle,
-  ) {
-    final safeSongId = songId?.trim() ?? '';
-    final safeTitle = fallbackTitle?.trim() ?? '';
-    if (safeSongId.isEmpty && safeTitle.isEmpty) {
-      return Future.value(null);
-    }
-    final cacheKey = _previewCacheKey(safeSongId, keyText, safeTitle);
-    final existing = _previewCache[cacheKey];
-    if (existing != null) return existing;
-    final future =
-        _loadCurrentPreview(firestore, storage, safeSongId, keyText, safeTitle)
-            .then((preview) {
-              // Do not keep null results cached forever. Otherwise newly uploaded
-              // assets never appear until full page reload.
-              if (preview == null) {
-                _previewCache.remove(cacheKey);
-                _resolvedPreviewCache.remove(cacheKey);
-              }
-              if (preview != null) {
-                _resolvedPreviewCache[cacheKey] = preview;
-              }
-              return preview;
-            })
-            .catchError((error, stackTrace) {
-              _previewCache.remove(cacheKey);
-              _resolvedPreviewCache.remove(cacheKey);
-              throw error;
-            });
-    _previewCache[cacheKey] = future;
-    return future;
-  }
+  ) => _renderPresenter.loadPreviewCached(
+    songId: songId,
+    keyText: keyText,
+    fallbackTitle: fallbackTitle,
+    loader: (resolvedSongId, resolvedKeyText, resolvedFallbackTitle) =>
+        _loadCurrentPreview(
+          firestore,
+          storage,
+          resolvedSongId,
+          resolvedKeyText,
+          resolvedFallbackTitle,
+        ),
+  );
 
   Future<List<String>> _loadAvailableKeysCached(
     FirebaseFirestore firestore,
     String songId,
   ) {
+    if (!_songKeysFutureCache.containsKey(songId) &&
+        _songKeysFutureCache.length >= 96) {
+      _songKeysFutureCache.clear();
+    }
     return _songKeysFutureCache.putIfAbsent(
       songId,
       () => _loadAvailableKeysForSong(firestore, songId),
     );
   }
 
-  void _ensureViewerAssetKey(String key) {
-    if (_activeViewerAssetKey == key) return;
-    _activeViewerAssetKey = key;
-    _viewerController.value = Matrix4.identity();
-  }
+  void _ensureViewerAssetKey(String key) =>
+      _renderPresenter.ensureViewerAssetKey(key);
 
-  void _syncImageRendererKey(String key) {
-    if (_activeImageRendererKey == key) return;
-    _activeImageRendererKey = key;
-    _fallbackToHtmlImageElement = false;
-    _switchingImageRenderer = false;
-  }
+  void _syncImageRendererKey(String key) =>
+      _renderPresenter.syncImageRendererKey(key);
 
   void _warmPreview(
     FirebaseFirestore firestore,
@@ -1283,288 +1468,75 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     String? songId,
     String? keyText,
     String? fallbackTitle,
-  ) {
-    final safeSongId = songId?.trim() ?? '';
-    final safeTitle = fallbackTitle?.trim() ?? '';
-    if (safeSongId.isEmpty && safeTitle.isEmpty) return;
-    final cacheKey = _previewCacheKey(safeSongId, keyText, safeTitle);
-    final previewFuture = _loadPreviewCached(
-      firestore,
-      storage,
-      safeSongId,
-      keyText,
-      safeTitle,
-    );
-    _queuePreviewPrefetch(cacheKey, previewFuture);
+  ) => _renderPresenter.warmPreview(
+    songId: songId,
+    keyText: keyText,
+    fallbackTitle: fallbackTitle,
+    context: context,
+    isMounted: () => mounted,
+    loader: (resolvedSongId, resolvedKeyText, resolvedFallbackTitle) =>
+        _loadCurrentPreview(
+          firestore,
+          storage,
+          resolvedSongId,
+          resolvedKeyText,
+          resolvedFallbackTitle,
+        ),
+  );
+
+  void _evictPreviewCache(
+    String songId,
+    String? keyText,
+    String? fallbackTitle,
+  ) => _renderPresenter.evictPreviewCache(songId, keyText, fallbackTitle);
+
+  void _scheduleOverlayAutoHide() => _renderPresenter.scheduleOverlayAutoHide(
+    drawingEnabled: _drawingEnabled,
+    isMounted: () => mounted,
+    requestRebuild: _requestRenderPresenterRebuild,
+  );
+
+  void _showOverlayTemporarily() => _renderPresenter.showOverlayTemporarily(
+    drawingEnabled: _drawingEnabled,
+    isMounted: () => mounted,
+    requestRebuild: _requestRenderPresenterRebuild,
+  );
+
+  void _toggleOverlay() => _renderPresenter.toggleOverlay(
+    drawingEnabled: _drawingEnabled,
+    isMounted: () => mounted,
+    requestRebuild: _requestRenderPresenterRebuild,
+  );
+
+  void _markViewerNeedsBuild() {
+    _viewerRevision.value = _viewerRevision.value + 1;
   }
 
-  void _queuePreviewPrefetch(
-    String cacheKey,
-    Future<_LiveCueAssetPreview?> previewFuture,
-  ) {
-    if (_prefetchedPreviewKeys.contains(cacheKey)) return;
-    if (!_queuedPrefetchKeys.add(cacheKey)) return;
-    unawaited(
-      previewFuture
-          .then((preview) async {
-            if (!mounted || preview == null || !preview.isImage) return;
-            final bytes = preview.initialBytes;
-            if (bytes == null || bytes.isEmpty) {
-              // Web prefetch via XHR is CORS-sensitive for token URLs.
-              // Runtime viewer uses WebHtmlElementStrategy.prefer instead.
-              if (kIsWeb) return;
-            }
-            final ImageProvider<Object> provider =
-                bytes != null && bytes.isNotEmpty
-                ? MemoryImage(bytes)
-                : NetworkImage(preview.url);
-            await precacheImage(provider, context);
-            _prefetchedPreviewKeys.add(cacheKey);
-          })
-          .catchError((_) {
-            // Prefetch is best effort only.
-          })
-          .whenComplete(() {
-            _queuedPrefetchKeys.remove(cacheKey);
-          }),
-    );
+  void _markOverlayNeedsBuild() {
+    _overlayRevision.value = _overlayRevision.value + 1;
   }
 
-  void _ensureWebPollingStreams(
-    Query<Map<String, dynamic>> setlistQuery,
-    DocumentReference<Map<String, dynamic>> liveCueRef,
-  ) {
-    if (!kIsWeb) return;
-    final scopeKey = '${widget.teamId}/${widget.projectId}';
-    if (_webPollingScopeKey == scopeKey &&
-        _webSetlistStream != null &&
-        _webCueStream != null) {
-      return;
-    }
-    _webPollingScopeKey = scopeKey;
-    _webSetlistStream = _setlistPollingStream(setlistQuery).asBroadcastStream();
-    _webCueStream = _liveCuePollingStream(liveCueRef).asBroadcastStream();
+  void _requestRenderPresenterRebuild() {
+    if (!mounted) return;
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
   }
 
-  Stream<QuerySnapshot<Map<String, dynamic>>> _setlistPollingStream(
-    Query<Map<String, dynamic>> query,
-  ) async* {
-    QuerySnapshot<Map<String, dynamic>>? lastGoodSnapshot;
-    String? lastSignature;
-    while (mounted) {
-      try {
-        final snapshot = await query.get().timeout(const Duration(seconds: 12));
-        final signature = _setlistSignature(snapshot);
-        if (signature != lastSignature) {
-          lastSignature = signature;
-          lastGoodSnapshot = snapshot;
-          yield snapshot;
-        }
-      } catch (_) {
-        if (lastGoodSnapshot != null) {
-          yield lastGoodSnapshot;
-        }
-      }
-      await Future<void>.delayed(_webSetlistPollInterval);
-    }
-  }
-
-  Stream<DocumentSnapshot<Map<String, dynamic>>> _liveCuePollingStream(
-    DocumentReference<Map<String, dynamic>> docRef,
-  ) async* {
-    DocumentSnapshot<Map<String, dynamic>>? lastGoodSnapshot;
-    String? lastSignature;
-    while (mounted) {
-      try {
-        final snapshot = await docRef.get().timeout(
-          const Duration(seconds: 12),
-        );
-        final signature = _liveCueSignature(snapshot);
-        if (signature != lastSignature) {
-          lastSignature = signature;
-          lastGoodSnapshot = snapshot;
-          yield snapshot;
-        }
-      } catch (_) {
-        if (lastGoodSnapshot != null) {
-          yield lastGoodSnapshot;
-        }
-      }
-      await Future<void>.delayed(_webCuePollInterval);
-    }
-  }
-
-  String _setlistSignature(QuerySnapshot<Map<String, dynamic>> snapshot) {
-    if (snapshot.docs.isEmpty) return '<empty>';
-    final buffer = StringBuffer();
-    for (final doc in snapshot.docs) {
-      final data = doc.data();
-      buffer
-        ..write(doc.id)
-        ..write('|')
-        ..write(data['order'])
-        ..write('|')
-        ..write(data['songId'])
-        ..write('|')
-        ..write(data['displayTitle'])
-        ..write('|')
-        ..write(data['freeTextTitle'])
-        ..write('|')
-        ..write(data['keyText'])
-        ..write(';');
-    }
-    return buffer.toString();
-  }
-
-  String _liveCueSignature(DocumentSnapshot<Map<String, dynamic>> snapshot) {
-    final data = snapshot.data() ?? const <String, dynamic>{};
-    final watchedKeys = <String>[
-      'currentSongId',
-      'currentDisplayTitle',
-      'currentFreeTextTitle',
-      'currentKeyText',
-      'currentCueLabel',
-      'nextSongId',
-      'nextDisplayTitle',
-      'nextFreeTextTitle',
-      'nextKeyText',
-      'nextCueLabel',
-      'updatedAt',
-      'updatedBy',
-    ];
-    final buffer = StringBuffer(snapshot.id);
-    for (final key in watchedKeys) {
-      buffer
-        ..write('|')
-        ..write(key)
-        ..write('=')
-        ..write(data[key]);
-    }
-    return buffer.toString();
-  }
-
-  void _scheduleOverlayAutoHide() {
-    if (_drawingEnabled) return;
-    _overlayTimer?.cancel();
-    _overlayTimer = Timer(const Duration(seconds: 3), () {
-      if (!mounted) return;
-      setState(() => _showOverlay = false);
-    });
-  }
-
-  void _showOverlayTemporarily() {
-    if (!_showOverlay) {
-      setState(() => _showOverlay = true);
-    }
-    _scheduleOverlayAutoHide();
-  }
-
-  void _toggleOverlay() {
-    if (_drawingEnabled) return;
-    if (_showOverlay) {
-      _overlayTimer?.cancel();
-      setState(() => _showOverlay = false);
-      return;
-    }
-    setState(() => _showOverlay = true);
-    _scheduleOverlayAutoHide();
-  }
-
-  Future<_LiveCueNotePayload> _loadPrivateNotePayload(
+  Future<_LiveCueContext> _ensureContextFuture(
     FirebaseFirestore firestore,
     String userId,
-  ) async {
-    final v2Ref = _privateProjectNoteRefFor(
-      firestore,
-      widget.teamId,
-      widget.projectId,
-      userId,
-    );
-    final v2Doc = await v2Ref.get();
-    final v2Data = v2Doc.data();
-    if (v2Data != null) {
-      return _LiveCueNotePayload.fromMap(v2Data);
+  ) {
+    if (_contextFuture == null || _contextFutureUserId != userId) {
+      _contextFutureUserId = userId;
+      _contextFuture = _loadContext(firestore, userId);
+      _noteLayersLoaded = false;
+      _noteLayersKey = null;
     }
-
-    final legacyDoc = await firestore
-        .collection('teams')
-        .doc(widget.teamId)
-        .collection('userProjectNotes')
-        .doc(privateProjectNoteDocIdLegacy(widget.projectId, userId))
-        .get();
-    final legacyData = legacyDoc.data();
-    if (legacyData != null) {
-      unawaited(
-        logLegacyFallbackUsage(
-          firestore: firestore,
-          teamId: widget.teamId,
-          path: 'live_cue.legacy_doc_id',
-          detail: widget.projectId,
-        ),
-      );
-      final merged = {
-        ...legacyData,
-        'visibility': 'private',
-        'ownerUserId': userId,
-        'teamId': widget.teamId,
-        'projectId': widget.projectId,
-      };
-      try {
-        await v2Ref.set(merged, SetOptions(merge: true));
-      } on FirebaseException {
-        // Ignore migration failure; use loaded payload as-is.
-      }
-      return _LiveCueNotePayload.fromMap(merged);
-    }
-
-    final legacyQuery = await firestore
-        .collection('teams')
-        .doc(widget.teamId)
-        .collection('userProjectNotes')
-        .where('userId', isEqualTo: userId)
-        .where('projectId', isEqualTo: widget.projectId)
-        .limit(1)
-        .get();
-    if (legacyQuery.docs.isEmpty) return _LiveCueNotePayload();
-    unawaited(
-      logLegacyFallbackUsage(
-        firestore: firestore,
-        teamId: widget.teamId,
-        path: 'live_cue.legacy_query',
-        detail: widget.projectId,
-      ),
-    );
-    final queryData = legacyQuery.docs.first.data();
-    final merged = {
-      ...queryData,
-      'visibility': 'private',
-      'ownerUserId': userId,
-      'teamId': widget.teamId,
-      'projectId': widget.projectId,
-    };
-    try {
-      await v2Ref.set(merged, SetOptions(merge: true));
-    } on FirebaseException {
-      // Ignore migration failure; use loaded payload as-is.
-    }
-    return _LiveCueNotePayload.fromMap(merged);
-  }
-
-  Future<_LiveCueNotePayload> _loadSharedNotePayload(
-    FirebaseFirestore firestore,
-  ) async {
-    final doc = await _sharedProjectNoteRefFor(
-      firestore,
-      widget.teamId,
-      widget.projectId,
-    ).get();
-    final data = doc.data();
-    if (data == null) return _LiveCueNotePayload();
-    return _LiveCueNotePayload.fromMap(data);
+    return _contextFuture!;
   }
 
   Future<void> _ensureNoteLayersLoaded(
-    FirebaseFirestore firestore,
+    LiveCueNotePersistenceAdapter notePersistence,
     String userId,
   ) async {
     final key = '${widget.teamId}/${widget.projectId}/$userId';
@@ -1575,17 +1547,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
       _loadingNoteLayers = true;
     });
     try {
-      final privatePayload = await _loadPrivateNotePayload(firestore, userId);
-      final sharedPayload = await _loadSharedNotePayload(firestore);
+      final noteLayers = await notePersistence.loadNoteLayers(userId: userId);
       if (!mounted) return;
       setState(() {
-        _privateNoteContent = privatePayload.text;
-        _sharedNoteContent = sharedPayload.text;
-        _privateLayerStrokes = List<_LiveCueSketchStroke>.from(
-          privatePayload.strokes,
-        );
-        _sharedLayerStrokes = List<_LiveCueSketchStroke>.from(
-          sharedPayload.strokes,
+        _privateNoteContent = noteLayers.privateLayer.text;
+        _sharedNoteContent = noteLayers.sharedLayer.text;
+        _strokeEngine.replaceLayerStrokes(
+          privateStrokes: noteLayers.privateLayer.strokes,
+          sharedStrokes: noteLayers.sharedLayer.strokes,
         );
         _noteLayersLoaded = true;
         _noteLayersKey = key;
@@ -1605,259 +1574,170 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     }
   }
 
-  Offset _normalizeOffset(Offset local, Size size) {
-    final safeWidth = size.width <= 0 ? 1.0 : size.width;
-    final safeHeight = size.height <= 0 ? 1.0 : size.height;
-    final dx = (local.dx / safeWidth).clamp(0.0, 1.0);
-    final dy = (local.dy / safeHeight).clamp(0.0, 1.0);
-    return Offset(dx, dy);
-  }
-
-  void _bumpStrokeRevision() {
-    _strokeRevision.value = _strokeRevision.value + 1;
-  }
-
   void _eraseLayerAt(Offset localPosition, Size size) {
-    if (!_drawingEnabled || !_eraserEnabled) return;
-    final point = _normalizeOffset(localPosition, size);
-    final target = _editingSharedLayer
-        ? _sharedLayerStrokes
-        : _privateLayerStrokes;
-    final hasHit = target.any((stroke) => _strokeHit(stroke, point));
-    if (!hasHit) return;
-    setState(() {
-      target.removeWhere((stroke) => _strokeHit(stroke, point));
-      _activeLayerStroke = null;
-    });
-    _bumpStrokeRevision();
+    if (!_strokeEngine.eraseAt(localPosition, size)) return;
   }
 
-  bool _strokeHit(_LiveCueSketchStroke stroke, Offset point) {
-    if (stroke.points.isEmpty) return false;
-    final radius = (0.018 + (stroke.width / 450.0)).clamp(0.012, 0.04);
-    final radiusSquared = radius * radius;
-    if (stroke.points.length == 1) {
-      final dot = stroke.points.first;
-      final dx = dot.dx - point.dx;
-      final dy = dot.dy - point.dy;
-      return (dx * dx + dy * dy) <= radiusSquared;
-    }
-    for (var i = 1; i < stroke.points.length; i++) {
-      final a = stroke.points[i - 1];
-      final b = stroke.points[i];
-      if (_distanceSquaredToSegment(point, a, b) <= radiusSquared) {
-        return true;
-      }
-    }
-    return false;
+  void _startLayerStroke(Offset localPosition, Size size) {
+    if (!_strokeEngine.beginStroke(localPosition, size)) return;
   }
 
-  double _distanceSquaredToSegment(Offset p, Offset a, Offset b) {
-    final abx = b.dx - a.dx;
-    final aby = b.dy - a.dy;
-    final apx = p.dx - a.dx;
-    final apy = p.dy - a.dy;
-    final abSquared = (abx * abx) + (aby * aby);
-    if (abSquared <= 1e-12) {
-      return (apx * apx) + (apy * apy);
-    }
-    final t = ((apx * abx) + (apy * aby)) / abSquared;
-    final clampedT = t.clamp(0.0, 1.0);
-    final closestX = a.dx + (abx * clampedT);
-    final closestY = a.dy + (aby * clampedT);
-    final dx = p.dx - closestX;
-    final dy = p.dy - closestY;
-    return (dx * dx) + (dy * dy);
-  }
-
-  void _startLayerStroke(DragStartDetails details, Size size) {
-    if (!_drawingEnabled || _eraserEnabled) return;
-    final point = _normalizeOffset(details.localPosition, size);
-    setState(() {
-      _activeLayerStroke = _LiveCueSketchStroke(
-        points: <Offset>[point],
-        colorValue: _drawingColorValue,
-        width: _drawingStrokeWidth,
-      );
-    });
-  }
-
-  void _appendLayerStroke(DragUpdateDetails details, Size size) {
-    if (_eraserEnabled) return;
-    final active = _activeLayerStroke;
-    if (active == null) return;
-    final point = _normalizeOffset(details.localPosition, size);
-    active.points.add(point);
-    _bumpStrokeRevision();
+  void _appendLayerStroke(Offset localPosition, Size size) {
+    _strokeEngine.appendStroke(localPosition, size);
   }
 
   void _endLayerStroke() {
-    final active = _activeLayerStroke;
-    if (active == null) return;
-    setState(() {
-      if (active.points.isNotEmpty) {
-        if (_editingSharedLayer) {
-          _sharedLayerStrokes.add(active);
-        } else {
-          _privateLayerStrokes.add(active);
-        }
-      }
-      _activeLayerStroke = null;
-    });
-    _bumpStrokeRevision();
+    if (!_strokeEngine.endStroke()) return;
   }
 
-  void _tapLayerStroke(TapDownDetails details, Size size) {
-    if (!_drawingEnabled || _eraserEnabled) return;
-    final point = _normalizeOffset(details.localPosition, size);
-    final dotStroke = _LiveCueSketchStroke(
-      points: <Offset>[point],
-      colorValue: _drawingColorValue,
-      width: _drawingStrokeWidth,
-    );
-    setState(() {
-      if (_editingSharedLayer) {
-        _sharedLayerStrokes.add(dotStroke);
-      } else {
-        _privateLayerStrokes.add(dotStroke);
-      }
-      _activeLayerStroke = null;
-    });
-    _bumpStrokeRevision();
+  void _handleDrawingPointerDown(PointerDownEvent event, Size size) {
+    if (!_supportsDrawingPointer(event.kind)) return;
+    if (_activeDrawingPointer != null) return;
+    _activeDrawingPointer = event.pointer;
+    if (_eraserEnabled) {
+      _eraseLayerAt(event.localPosition, size);
+      return;
+    }
+    _startLayerStroke(event.localPosition, size);
+  }
+
+  void _handleDrawingPointerMove(PointerMoveEvent event, Size size) {
+    if (!_supportsDrawingPointer(event.kind)) return;
+    if (_activeDrawingPointer != event.pointer) return;
+    if (_eraserEnabled) {
+      _eraseLayerAt(event.localPosition, size);
+      return;
+    }
+    _appendLayerStroke(event.localPosition, size);
+  }
+
+  void _handleDrawingPointerUpOrCancel(PointerEvent event) {
+    if (_activeDrawingPointer != event.pointer) return;
+    if (!_eraserEnabled) {
+      _endLayerStroke();
+    }
+    _activeDrawingPointer = null;
   }
 
   void _undoLayerStroke() {
-    setState(() {
-      if (_activeLayerStroke != null) {
-        _activeLayerStroke = null;
-        return;
-      }
-      final target = _editingSharedLayer
-          ? _sharedLayerStrokes
-          : _privateLayerStrokes;
-      if (target.isNotEmpty) {
-        target.removeLast();
-      }
-    });
-    _bumpStrokeRevision();
+    _strokeEngine.undoCurrentLayer();
   }
 
   void _clearLayerStroke() {
-    setState(() {
-      if (_editingSharedLayer) {
-        _sharedLayerStrokes.clear();
-      } else {
-        _privateLayerStrokes.clear();
-      }
-      _activeLayerStroke = null;
-    });
-    _bumpStrokeRevision();
+    _strokeEngine.clearCurrentLayer();
   }
 
   void _setDrawingEnabled(bool value) {
     if (_drawingEnabled == value) return;
-    setState(() {
-      _drawingEnabled = value;
-      _showOverlay = true;
-      if (value && _fallbackToHtmlImageElement) {
-        // Prefer canvas-backed renderer while drawing to keep pointer events stable.
-        _fallbackToHtmlImageElement = false;
-        _switchingImageRenderer = false;
-      }
-      if (!value) {
-        _activeLayerStroke = null;
-        _eraserEnabled = false;
-        _bumpStrokeRevision();
-      }
-    });
+    final shouldResetHtmlFallback = value && _fallbackToHtmlImageElement;
+    _strokeEngine.setDrawingEnabled(value);
+    if (!value) {
+      _activeDrawingPointer = null;
+      _showDrawingToolPanel = false;
+    } else {
+      _showDrawingToolPanel = false;
+    }
+    _showOverlay = true;
+    if (shouldResetHtmlFallback) {
+      // Prefer canvas-backed renderer while drawing to keep pointer events stable.
+      _renderPresenter.resetHtmlImageFallback();
+      _markViewerNeedsBuild();
+    }
+    _markOverlayNeedsBuild();
     if (value) {
-      _overlayTimer?.cancel();
+      _renderPresenter.cancelOverlayAutoHide();
     } else {
       _scheduleOverlayAutoHide();
     }
   }
 
-  List<_LiveCueSketchStroke> _overlayStrokesForRender() {
-    final strokes = <_LiveCueSketchStroke>[];
-    if (_showPrivateLayer) {
-      strokes.addAll(_privateLayerStrokes);
-    }
-    if (_showSharedLayer) {
-      strokes.addAll(_sharedLayerStrokes);
-    }
-    if (_activeLayerStroke != null) {
-      strokes.add(_activeLayerStroke!);
-    }
-    return strokes;
+  void _setEraserEnabled(bool value) {
+    if (_eraserEnabled == value) return;
+    _strokeEngine.setEraserEnabled(value);
   }
 
-  Future<void> _saveLayerNotes(
-    FirebaseFirestore firestore,
-    String userId,
-  ) async {
-    if (_savingNoteLayers) return;
-    setState(() {
-      _savingNoteLayers = true;
-    });
+  void _setEditingSharedLayer(bool value) {
+    if (_editingSharedLayer == value) return;
+    _strokeEngine.setEditingSharedLayer(value);
+  }
+
+  void _setLayerVisibility({bool? showPrivateLayer, bool? showSharedLayer}) {
+    _strokeEngine.setLayerVisibility(
+      showPrivateLayer: showPrivateLayer,
+      showSharedLayer: showSharedLayer,
+    );
+  }
+
+  void _setDrawingColorValue(int colorValue) {
+    if (_drawingColorValue == colorValue) return;
+    _strokeEngine.setBrush(colorValue: colorValue);
+  }
+
+  void _setDrawingStrokeWidth(double strokeWidth) {
+    if ((_drawingStrokeWidth - strokeWidth).abs() < 0.05) return;
+    _strokeEngine.setBrush(strokeWidth: strokeWidth);
+  }
+
+  void _toggleDrawingToolPanel() {
+    if (!mounted || !_drawingEnabled) return;
+    _showDrawingToolPanel = !_showDrawingToolPanel;
+    if (_showDrawingToolPanel) {
+      _showOverlay = true;
+    }
+    _markOverlayNeedsBuild();
+  }
+
+  List<SketchStroke> _overlayStrokesForRender() {
+    return _strokeEngine.overlayStrokesForRender();
+  }
+
+  Future<bool> _saveLayerNotes(
+    LiveCueNotePersistenceAdapter notePersistence,
+    String userId, {
+    bool saveBothLayers = false,
+  }) async {
+    if (_savingNoteLayers) return false;
+    _savingNoteLayers = true;
+    _markOverlayNeedsBuild();
     final auth = ref.read(firebaseAuthProvider);
     final user = auth.currentUser;
     final actor = user?.displayName ?? user?.email ?? user?.uid;
+    var saved = false;
 
     try {
-      if (_editingSharedLayer) {
-        await _sharedProjectNoteRefFor(
-          firestore,
-          widget.teamId,
-          widget.projectId,
-        ).set({
-          'teamId': widget.teamId,
-          'projectId': widget.projectId,
-          'visibility': 'team',
-          'content': _sharedNoteContent,
-          'drawingStrokes': _sharedLayerStrokes
-              .map((stroke) => stroke.toMap())
-              .toList(),
-          'updatedAt': FieldValue.serverTimestamp(),
-          'updatedBy': actor,
-        }, SetOptions(merge: true));
-      } else {
-        await _privateProjectNoteRefFor(
-          firestore,
-          widget.teamId,
-          widget.projectId,
-          userId,
-        ).set({
-          'userId': userId,
-          'ownerUserId': userId,
-          'projectId': widget.projectId,
-          'teamId': widget.teamId,
-          'visibility': 'private',
-          'content': _privateNoteContent,
-          'drawingStrokes': _privateLayerStrokes
-              .map((stroke) => stroke.toMap())
-              .toList(),
-          'updatedAt': FieldValue.serverTimestamp(),
-          'updatedBy': actor,
-        }, SetOptions(merge: true));
-      }
-      if (!mounted) return;
+      final saveResult = await notePersistence.saveNoteLayers(
+        userId: userId,
+        actor: actor,
+        privateText: _privateNoteContent,
+        sharedText: _sharedNoteContent,
+        privateStrokes: _privateLayerStrokes,
+        sharedStrokes: _sharedLayerStrokes,
+        editingSharedLayer: _editingSharedLayer,
+        saveBothLayers: saveBothLayers,
+      );
+      saved = true;
+      if (!mounted) return saved;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(_editingSharedLayer ? '공유 레이어 저장 완료' : '개인 레이어 저장 완료'),
+          content: Text(
+            saveResult.wroteBoth
+                ? '개인/공유 레이어 저장 완료'
+                : (_editingSharedLayer ? '공유 레이어 저장 완료' : '개인 레이어 저장 완료'),
+          ),
         ),
       );
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted) return saved;
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('레이어 메모 저장 실패: $error')));
     } finally {
+      _savingNoteLayers = false;
       if (mounted) {
-        setState(() {
-          _savingNoteLayers = false;
-        });
+        _markOverlayNeedsBuild();
       }
     }
+    return saved;
   }
 
   Future<_LiveCueContext> _loadContext(
@@ -1877,29 +1757,42 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
         .doc(userId);
 
     final project = await projectRef.get().timeout(const Duration(seconds: 12));
-    var member = await memberRef.get().timeout(const Duration(seconds: 12));
+    final member = await memberRef.get().timeout(const Duration(seconds: 12));
     final team = await teamRef.get().timeout(const Duration(seconds: 12));
     final createdBy = (team.data()?['createdBy'] ?? '').toString();
-    if (!member.exists && team.exists && createdBy == userId) {
-      final authUser = ref.read(firebaseAuthProvider).currentUser;
-      // Keep creator access resilient when legacy member docs are missing.
-      await memberRef.set({
-        'userId': userId,
-        'uid': userId,
-        'email': authUser?.email?.toLowerCase(),
-        'displayName': authUser?.displayName,
-        'nickname': null,
-        'role': 'admin',
-        'teamName': (team.data()?['name'] ?? '팀').toString(),
-        'capabilities': {'songEditor': true},
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-      await teamRef.set({
-        'memberUids': FieldValue.arrayUnion([userId]),
-      }, SetOptions(merge: true));
-      member = await memberRef.get().timeout(const Duration(seconds: 12));
-    }
-    return _LiveCueContext(project: project, member: member);
+    final isTeamCreator = team.exists && createdBy == userId;
+    return _LiveCueContext(
+      project: project,
+      member: member,
+      isTeamCreator: isTeamCreator,
+    );
+  }
+
+  void _warmScoreTripletIfNeeded({
+    required FirebaseFirestore firestore,
+    required FirebaseStorage storage,
+    required String? currentSongId,
+    required String? currentKey,
+    required String currentTitle,
+    required String? prevSongId,
+    required String? prevKey,
+    required String prevTitle,
+    required String? nextSongId,
+    required String? nextKey,
+    required String nextTitle,
+  }) {
+    // Avoid cache/prefetch churn while actively drawing (Apple Pencil/touch).
+    if (_drawingEnabled && _activeDrawingPointer != null) return;
+    final signature =
+        '${currentSongId ?? ''}|${currentKey ?? ''}|$currentTitle|'
+        '${prevSongId ?? ''}|${prevKey ?? ''}|$prevTitle|'
+        '${nextSongId ?? ''}|${nextKey ?? ''}|$nextTitle';
+    if (_lastWarmPreviewSignature == signature) return;
+    _lastWarmPreviewSignature = signature;
+
+    _warmPreview(firestore, storage, currentSongId, currentKey, currentTitle);
+    _warmPreview(firestore, storage, prevSongId, prevKey, prevTitle);
+    _warmPreview(firestore, storage, nextSongId, nextKey, nextTitle);
   }
 
   Future<void> _seedFromSetlistIfNeeded(
@@ -1986,7 +1879,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
       widget.projectId,
     ).set(updates, SetOptions(merge: true));
     if (mounted) {
-      setState(() {});
+      _markOverlayNeedsBuild();
     }
   }
 
@@ -1998,9 +1891,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     int step,
   ) async {
     if (!canEdit || items.isEmpty || _moving) return;
-    setState(() => _moving = true);
+    _moving = true;
     try {
-      var index = _findCurrentIndex(items, cueData);
+      var index = LiveCueResolvedState.findCurrentIndex(
+        items: items,
+        cueData: cueData,
+        cueLabelFromItem: _cueLabelFromItem,
+        normalizeKeyText: normalizeKeyText,
+      );
       if (index < 0) index = 0;
       final nextIndex = (index + step).clamp(0, items.length - 1);
       await _applySetlistAsCurrent(
@@ -2011,8 +1909,9 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
       );
       _showOverlayTemporarily();
     } finally {
+      _moving = false;
       if (mounted) {
-        setState(() => _moving = false);
+        _markOverlayNeedsBuild();
       }
     }
   }
@@ -2034,7 +1933,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
     }, SetOptions(merge: true));
     if (mounted) {
       _showOverlayTemporarily();
-      setState(() {});
+      _markOverlayNeedsBuild();
     }
   }
 
@@ -2048,9 +1947,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
 
     final firestore = ref.watch(firestoreProvider);
     final storage = ref.watch(storageProvider);
+    final notePersistence = LiveCueNotePersistenceAdapter(
+      firestore: firestore,
+      teamId: widget.teamId,
+      projectId: widget.projectId,
+    );
 
     return FutureBuilder<_LiveCueContext>(
-      future: _loadContext(firestore, user.uid),
+      future: _ensureContextFuture(firestore, user.uid),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
@@ -2061,7 +1965,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
         if (contextData == null || contextData.project.data() == null) {
           return const Scaffold(body: Center(child: Text('프로젝트를 찾을 수 없습니다.')));
         }
-        if (!contextData.member.exists) {
+        if (!contextData.member.exists && !contextData.isTeamCreator) {
           return Scaffold(
             body: Center(
               child: AppStateCard(
@@ -2079,14 +1983,17 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
         final projectData = contextData.project.data()!;
         final leaderId = projectData['leaderUserId']?.toString();
         final role = contextData.member.data()?['role']?.toString();
-        final canEdit = leaderId == user.uid || isAdminRole(role);
+        final canEdit =
+            leaderId == user.uid ||
+            isAdminRole(role) ||
+            contextData.isTeamCreator;
         final noteLayersKey =
             '${widget.teamId}/${widget.projectId}/${user.uid}';
         if ((!_noteLayersLoaded || _noteLayersKey != noteLayersKey) &&
             !_loadingNoteLayers) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (!mounted) return;
-            _ensureNoteLayersLoaded(firestore, user.uid);
+            _ensureNoteLayersLoaded(notePersistence, user.uid);
           });
         }
 
@@ -2101,11 +2008,12 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
           widget.projectId,
         );
         final setlistQuery = setlistRef.orderBy('order');
-        _ensureWebPollingStreams(setlistQuery, liveCueRef);
-        final setlistStream = kIsWeb
-            ? _webSetlistStream!
-            : setlistQuery.snapshots();
-        final cueStream = kIsWeb ? _webCueStream! : liveCueRef.snapshots();
+        final syncStreams = _syncCoordinator.attach(
+          setlistQuery: setlistQuery,
+          liveCueRef: liveCueRef,
+        );
+        final setlistStream = syncStreams.setlist;
+        final cueStream = syncStreams.cue;
 
         return Scaffold(
           backgroundColor: Colors.black,
@@ -2193,41 +2101,33 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                         });
                       }
 
-                      var currentIndex = _findCurrentIndex(items, cueData);
-                      if (currentIndex < 0 && items.isNotEmpty) {
-                        currentIndex = 0;
-                      }
-
-                      final currentSongId = cueData['currentSongId']
-                          ?.toString();
-                      final currentLabel =
-                          cueData['currentCueLabel']?.toString() ??
-                          (currentIndex >= 0 && currentIndex < items.length
-                              ? _cueLabelFromItem(
-                                  items[currentIndex].data(),
-                                  currentIndex + 1,
-                                )
-                              : '현재');
-                      final currentTitle =
-                          cueData['currentDisplayTitle']?.toString() ??
-                          cueData['currentFreeTextTitle']?.toString() ??
-                          (currentIndex >= 0 && currentIndex < items.length
-                              ? _titleFromItem(items[currentIndex].data())
-                              : '현재 곡 없음');
-                      final currentKey = cueData['currentKeyText']?.toString();
+                      final syncState = LiveCueResolvedState.resolve(
+                        items: items,
+                        cueData: cueData,
+                        cueLabelFromItem: _cueLabelFromItem,
+                        titleFromItem: _titleFromItem,
+                        keyFromItem: _keyFromItem,
+                        normalizeKeyText: normalizeKeyText,
+                      );
+                      final currentIndex = syncState.currentIndex;
+                      final currentSongId = syncState.currentSongId;
+                      final currentLabel = syncState.currentLabel;
+                      final currentTitle = syncState.currentTitle;
+                      final currentKey = syncState.currentKey;
+                      final currentPreviewTitle =
+                          syncState.setlistCurrentTitle.isNotEmpty
+                          ? syncState.setlistCurrentTitle
+                          : currentTitle;
                       final currentPreviewCacheKey = _previewCacheKey(
                         currentSongId?.trim() ?? '',
                         currentKey,
-                        currentTitle,
+                        currentPreviewTitle,
                       );
-                      final cachedCurrentPreview =
-                          _resolvedPreviewCache[currentPreviewCacheKey];
+                      final cachedCurrentPreview = _renderPresenter
+                          .cachedPreview(currentPreviewCacheKey);
                       final nextSongId = cueData['nextSongId']?.toString();
-                      final nextKey = cueData['nextKeyText']?.toString();
-                      final nextTitle =
-                          cueData['nextDisplayTitle']?.toString() ??
-                          cueData['nextFreeTextTitle']?.toString() ??
-                          '';
+                      final nextKey = syncState.nextKey;
+                      final nextTitle = syncState.nextTitle;
 
                       String? prevSongId;
                       String? prevKey;
@@ -2239,26 +2139,18 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                         prevTitle = _titleFromItem(prevData);
                       }
 
-                      _warmPreview(
-                        firestore,
-                        storage,
-                        currentSongId,
-                        currentKey,
-                        currentTitle,
-                      );
-                      _warmPreview(
-                        firestore,
-                        storage,
-                        prevSongId,
-                        prevKey,
-                        prevTitle,
-                      );
-                      _warmPreview(
-                        firestore,
-                        storage,
-                        nextSongId,
-                        nextKey,
-                        nextTitle,
+                      _warmScoreTripletIfNeeded(
+                        firestore: firestore,
+                        storage: storage,
+                        currentSongId: currentSongId,
+                        currentKey: currentKey,
+                        currentTitle: currentPreviewTitle,
+                        prevSongId: prevSongId,
+                        prevKey: prevKey,
+                        prevTitle: prevTitle,
+                        nextSongId: nextSongId,
+                        nextKey: nextKey,
+                        nextTitle: nextTitle,
                       );
 
                       return Stack(
@@ -2292,159 +2184,92 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                         );
                                       }
                                     },
-                              child: FutureBuilder<_LiveCueAssetPreview?>(
-                                future: _loadPreviewCached(
-                                  firestore,
-                                  storage,
-                                  currentSongId,
-                                  currentKey,
-                                  currentTitle,
-                                ),
-                                builder: (context, previewSnapshot) {
-                                  final preview =
-                                      previewSnapshot.data ??
-                                      cachedCurrentPreview;
-                                  if (previewSnapshot.connectionState ==
-                                          ConnectionState.waiting &&
-                                      preview == null) {
-                                    return const Center(
-                                      child: CircularProgressIndicator(
-                                        color: Colors.white,
-                                      ),
-                                    );
-                                  }
-                                  final songIdForDetail =
-                                      preview?.resolvedSongId ?? currentSongId;
-                                  if (preview == null) {
-                                    return Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Text(
-                                            '악보가 없습니다. (${_lineText(label: currentLabel, title: currentTitle, keyText: currentKey)})',
-                                            textAlign: TextAlign.center,
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 18,
-                                            ),
+                              child: ValueListenableBuilder<int>(
+                                valueListenable: _viewerRevision,
+                                builder: (context, viewerVersion, child) {
+                                  return FutureBuilder<_LiveCueAssetPreview?>(
+                                    future: _loadPreviewCached(
+                                      firestore,
+                                      storage,
+                                      currentSongId,
+                                      currentKey,
+                                      currentPreviewTitle,
+                                    ),
+                                    builder: (context, previewSnapshot) {
+                                      final preview =
+                                          previewSnapshot.data ??
+                                          cachedCurrentPreview;
+                                      if (previewSnapshot.connectionState ==
+                                              ConnectionState.waiting &&
+                                          preview == null) {
+                                        return const Center(
+                                          child: CircularProgressIndicator(
+                                            color: Colors.white,
                                           ),
-                                          const SizedBox(height: 10),
-                                          TextButton(
-                                            onPressed: () {
-                                              _previewCache.remove(
-                                                _previewCacheKey(
-                                                  currentSongId ?? '',
-                                                  currentKey,
-                                                  currentTitle,
-                                                ),
-                                              );
-                                              if (mounted) {
-                                                setState(() {});
-                                              }
-                                            },
-                                            child: const Text(
-                                              '다시 불러오기',
-                                              style: TextStyle(
-                                                color: Colors.white,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  }
-                                  if (!preview.isImage) {
-                                    return Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          const Icon(
-                                            Icons.picture_as_pdf,
-                                            size: 72,
-                                            color: Colors.white70,
-                                          ),
-                                          const SizedBox(height: 12),
-                                          Text(
-                                            preview.fileName,
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 18,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 8),
-                                          if (songIdForDetail != null)
-                                            TextButton(
-                                              onPressed: () {
-                                                _showOverlayTemporarily();
-                                                final keyQuery =
-                                                    (currentKey == null ||
-                                                        currentKey.isEmpty)
-                                                    ? ''
-                                                    : '?key=${Uri.encodeComponent(currentKey)}';
-                                                context.go(
-                                                  '/teams/${widget.teamId}/songs/$songIdForDetail$keyQuery',
-                                                );
-                                              },
-                                              child: const Text(
-                                                '악보 열기',
-                                                style: TextStyle(
-                                                  color: Colors.white,
-                                                ),
-                                              ),
-                                            ),
-                                          TextButton(
-                                            onPressed: () {
-                                              final opened = openUrlInNewTab(
-                                                preview.url,
-                                              );
-                                              if (!opened && mounted) {
-                                                ScaffoldMessenger.of(
-                                                  context,
-                                                ).showSnackBar(
-                                                  const SnackBar(
-                                                    content: Text(
-                                                      '팝업이 차단되었습니다. 브라우저 설정에서 팝업 차단을 해제해 주세요.',
-                                                    ),
-                                                  ),
-                                                );
-                                              }
-                                            },
-                                            child: const Text(
-                                              '파일 직접 열기',
-                                              style: TextStyle(
-                                                color: Colors.white,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    );
-                                  }
-                                  return LayoutBuilder(
-                                    builder: (context, constraints) {
-                                      final normalizedViewerKey =
-                                          (currentKey == null ||
-                                              currentKey.trim().isEmpty)
-                                          ? '-'
-                                          : normalizeKeyText(currentKey);
-                                      final viewerAssetKey =
-                                          '${preview.storagePath}|$normalizedViewerKey';
-                                      _ensureViewerAssetKey(viewerAssetKey);
-                                      Widget buildScoreLoadError() {
+                                        );
+                                      }
+                                      final songIdForDetail =
+                                          preview?.resolvedSongId ??
+                                          currentSongId;
+                                      if (preview == null) {
                                         return Center(
                                           child: Column(
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
                                               Text(
-                                                '악보 로드 실패: ${preview.fileName}',
+                                                '악보가 없습니다. (${_lineText(label: currentLabel, title: currentTitle, keyText: currentKey)})',
+                                                textAlign: TextAlign.center,
                                                 style: const TextStyle(
                                                   color: Colors.white,
+                                                  fontSize: 18,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 10),
+                                              TextButton(
+                                                onPressed: () {
+                                                  _evictPreviewCache(
+                                                    currentSongId ?? '',
+                                                    currentKey,
+                                                    currentPreviewTitle,
+                                                  );
+                                                  if (mounted) {
+                                                    _markViewerNeedsBuild();
+                                                  }
+                                                },
+                                                child: const Text(
+                                                  '다시 불러오기',
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      }
+                                      if (!preview.isImage) {
+                                        return Center(
+                                          child: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              const Icon(
+                                                Icons.picture_as_pdf,
+                                                size: 72,
+                                                color: Colors.white70,
+                                              ),
+                                              const SizedBox(height: 12),
+                                              Text(
+                                                preview.fileName,
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 18,
                                                 ),
                                               ),
                                               const SizedBox(height: 8),
                                               if (songIdForDetail != null)
                                                 TextButton(
                                                   onPressed: () {
+                                                    _showOverlayTemporarily();
                                                     final keyQuery =
                                                         (currentKey == null ||
                                                             currentKey.isEmpty)
@@ -2455,7 +2280,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                                     );
                                                   },
                                                   child: const Text(
-                                                    '악보 상세에서 열기',
+                                                    '악보 열기',
                                                     style: TextStyle(
                                                       color: Colors.white,
                                                     ),
@@ -2490,233 +2315,341 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                                           ),
                                         );
                                       }
-
-                                      final bytes = preview.initialBytes;
-                                      _syncImageRendererKey(viewerAssetKey);
-                                      final shouldUseHtmlStrategy =
-                                          kIsWeb &&
-                                          _fallbackToHtmlImageElement &&
-                                          !_drawingEnabled;
-                                      final htmlImageStrategy =
-                                          shouldUseHtmlStrategy
-                                          ? WebHtmlElementStrategy.prefer
-                                          : WebHtmlElementStrategy.never;
-
-                                      Widget buildImageLoadError(Object error) {
-                                        if (kIsWeb &&
-                                            bytes == null &&
-                                            !_drawingEnabled &&
-                                            !_fallbackToHtmlImageElement &&
-                                            !_switchingImageRenderer) {
-                                          _switchingImageRenderer = true;
-                                          WidgetsBinding.instance
-                                              .addPostFrameCallback((_) {
-                                                if (!mounted) return;
-                                                setState(() {
-                                                  _fallbackToHtmlImageElement =
-                                                      true;
-                                                  _switchingImageRenderer =
-                                                      false;
-                                                });
-                                              });
-                                          return const Center(
-                                            child: CircularProgressIndicator(
-                                              color: Colors.white,
-                                            ),
-                                          );
-                                        }
-                                        return buildScoreLoadError();
-                                      }
-
-                                      final imageWidget =
-                                          bytes != null && bytes.isNotEmpty
-                                          ? Image.memory(
-                                              bytes,
-                                              key: ValueKey(
-                                                'asset-memory-$viewerAssetKey',
-                                              ),
-                                              fit: BoxFit.contain,
-                                              filterQuality: FilterQuality.high,
-                                              gaplessPlayback: true,
-                                              errorBuilder:
-                                                  (context, error, stack) =>
-                                                      buildImageLoadError(
-                                                        error,
+                                      return LayoutBuilder(
+                                        builder: (context, constraints) {
+                                          final normalizedViewerKey =
+                                              (currentKey == null ||
+                                                  currentKey.trim().isEmpty)
+                                              ? '-'
+                                              : normalizeKeyText(currentKey);
+                                          final viewerAssetKey =
+                                              '${preview.storagePath}|$normalizedViewerKey';
+                                          _ensureViewerAssetKey(viewerAssetKey);
+                                          Widget buildScoreLoadError() {
+                                            return Center(
+                                              child: Column(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  Text(
+                                                    '악보 로드 실패: ${preview.fileName}',
+                                                    style: const TextStyle(
+                                                      color: Colors.white,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(height: 8),
+                                                  if (songIdForDetail != null)
+                                                    TextButton(
+                                                      onPressed: () {
+                                                        final keyQuery =
+                                                            (currentKey ==
+                                                                    null ||
+                                                                currentKey
+                                                                    .isEmpty)
+                                                            ? ''
+                                                            : '?key=${Uri.encodeComponent(currentKey)}';
+                                                        context.go(
+                                                          '/teams/${widget.teamId}/songs/$songIdForDetail$keyQuery',
+                                                        );
+                                                      },
+                                                      child: const Text(
+                                                        '악보 상세에서 열기',
+                                                        style: TextStyle(
+                                                          color: Colors.white,
+                                                        ),
                                                       ),
-                                            )
-                                          : Image.network(
-                                              preview.url,
-                                              key: ValueKey(
-                                                'asset-url-$viewerAssetKey',
-                                              ),
-                                              fit: BoxFit.contain,
-                                              filterQuality: FilterQuality.high,
-                                              webHtmlElementStrategy:
-                                                  htmlImageStrategy,
-                                              gaplessPlayback: true,
-                                              loadingBuilder:
-                                                  (
-                                                    context,
-                                                    child,
-                                                    loadingProgress,
-                                                  ) {
-                                                    if (loadingProgress ==
-                                                        null) {
-                                                      return child;
-                                                    }
-                                                    return const Center(
-                                                      child:
-                                                          CircularProgressIndicator(
-                                                            color: Colors.white,
+                                                    ),
+                                                  TextButton(
+                                                    onPressed: () {
+                                                      final opened =
+                                                          openUrlInNewTab(
+                                                            preview.url,
+                                                          );
+                                                      if (!opened && mounted) {
+                                                        ScaffoldMessenger.of(
+                                                          context,
+                                                        ).showSnackBar(
+                                                          const SnackBar(
+                                                            content: Text(
+                                                              '팝업이 차단되었습니다. 브라우저 설정에서 팝업 차단을 해제해 주세요.',
+                                                            ),
                                                           ),
-                                                    );
-                                                  },
-                                              errorBuilder:
-                                                  (context, error, stack) =>
-                                                      buildImageLoadError(
-                                                        error,
+                                                        );
+                                                      }
+                                                    },
+                                                    child: const Text(
+                                                      '파일 직접 열기',
+                                                      style: TextStyle(
+                                                        color: Colors.white,
                                                       ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             );
-                                      final renderStrokes =
-                                          _overlayStrokesForRender();
-                                      final canvasSize = Size(
-                                        constraints.maxWidth,
-                                        constraints.maxHeight,
-                                      );
-                                      final viewerContent = SizedBox(
-                                        width: constraints.maxWidth,
-                                        height: constraints.maxHeight,
-                                        child: Stack(
-                                          fit: StackFit.expand,
-                                          children: [
-                                            RepaintBoundary(child: imageWidget),
-                                            if (renderStrokes.isNotEmpty)
-                                              IgnorePointer(
-                                                child: RepaintBoundary(
-                                                  child: CustomPaint(
-                                                    painter:
-                                                        _LiveCueSketchPainter(
-                                                          strokes:
-                                                              renderStrokes,
+                                          }
+
+                                          final bytes = preview.initialBytes;
+                                          _syncImageRendererKey(viewerAssetKey);
+                                          final shouldUseHtmlStrategy =
+                                              kIsWeb &&
+                                              _fallbackToHtmlImageElement &&
+                                              !_drawingEnabled;
+                                          final htmlImageStrategy =
+                                              shouldUseHtmlStrategy
+                                              ? WebHtmlElementStrategy.prefer
+                                              : WebHtmlElementStrategy.never;
+
+                                          Widget buildImageLoadError(
+                                            Object error,
+                                          ) {
+                                            final switched = _renderPresenter
+                                                .tryActivateHtmlImageFallback(
+                                                  hasInitialBytes:
+                                                      bytes != null &&
+                                                      bytes.isNotEmpty,
+                                                  drawingEnabled:
+                                                      _drawingEnabled,
+                                                  isMounted: () => mounted,
+                                                  requestRebuild:
+                                                      _requestRenderPresenterRebuild,
+                                                );
+                                            if (switched) {
+                                              return const Center(
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      color: Colors.white,
+                                                    ),
+                                              );
+                                            }
+                                            return buildScoreLoadError();
+                                          }
+
+                                          final imageWidget =
+                                              bytes != null && bytes.isNotEmpty
+                                              ? Image.memory(
+                                                  bytes,
+                                                  key: ValueKey(
+                                                    'asset-memory-$viewerAssetKey',
+                                                  ),
+                                                  fit: BoxFit.contain,
+                                                  filterQuality:
+                                                      FilterQuality.high,
+                                                  gaplessPlayback: true,
+                                                  errorBuilder:
+                                                      (context, error, stack) =>
+                                                          buildImageLoadError(
+                                                            error,
+                                                          ),
+                                                )
+                                              : Image.network(
+                                                  preview.url,
+                                                  key: ValueKey(
+                                                    'asset-url-$viewerAssetKey',
+                                                  ),
+                                                  fit: BoxFit.contain,
+                                                  filterQuality:
+                                                      FilterQuality.high,
+                                                  webHtmlElementStrategy:
+                                                      htmlImageStrategy,
+                                                  gaplessPlayback: true,
+                                                  loadingBuilder:
+                                                      (
+                                                        context,
+                                                        child,
+                                                        loadingProgress,
+                                                      ) {
+                                                        if (loadingProgress ==
+                                                            null) {
+                                                          return child;
+                                                        }
+                                                        return const Center(
+                                                          child:
+                                                              CircularProgressIndicator(
+                                                                color: Colors
+                                                                    .white,
+                                                              ),
+                                                        );
+                                                      },
+                                                  errorBuilder:
+                                                      (context, error, stack) =>
+                                                          buildImageLoadError(
+                                                            error,
+                                                          ),
+                                                );
+                                          final canUseNextViewer =
+                                              _renderPresenter.canUseNextViewer;
+                                          if (canUseNextViewer &&
+                                              _viewerIdToken == null) {
+                                            return const Center(
+                                              child: CircularProgressIndicator(
+                                                color: Colors.white,
+                                              ),
+                                            );
+                                          }
+                                          if (canUseNextViewer &&
+                                              _viewerIdToken != null) {
+                                            final nextHostProps =
+                                                NextViewerHostProps(
+                                                  viewerUrl: _nextViewerUrl,
+                                                  initData: NextViewerInitData(
+                                                    teamId: widget.teamId,
+                                                    projectId: widget.projectId,
+                                                    currentSongId:
+                                                        currentSongId,
+                                                    currentKeyText: currentKey,
+                                                    scoreImageUrl: preview.url,
+                                                    idToken: _viewerIdToken!,
+                                                    canEdit:
+                                                        canEdit &&
+                                                        _drawingEnabled,
+                                                    editingSharedLayer:
+                                                        _editingSharedLayer,
+                                                    willReadFrequently:
+                                                        _nextViewerWillReadFrequently,
+                                                    privateStrokes:
+                                                        _privateLayerStrokes,
+                                                    sharedStrokes:
+                                                        _sharedLayerStrokes,
+                                                  ),
+                                                  syncRevision:
+                                                      _nextViewerSyncRevision,
+                                                  onInkCommit:
+                                                      _onNextViewerInkCommit,
+                                                  onDirtyChanged:
+                                                      _onNextViewerDirtyChanged,
+                                                  onAssetError:
+                                                      _onNextViewerAssetError,
+                                                  onProtocolLog:
+                                                      _onNextViewerProtocolLog,
+                                                );
+                                            return Center(
+                                              child: SizedBox(
+                                                width: constraints.maxWidth,
+                                                height: constraints.maxHeight,
+                                                child: NextViewerHostView(
+                                                  key: ValueKey(
+                                                    'next-viewer-$viewerAssetKey',
+                                                  ),
+                                                  props: nextHostProps,
+                                                ),
+                                              ),
+                                            );
+                                          }
+                                          final canvasSize = Size(
+                                            constraints.maxWidth,
+                                            constraints.maxHeight,
+                                          );
+                                          final shouldShowStrokeOverlay =
+                                              (_drawingEnabled && canEdit) ||
+                                              _privateLayerStrokes.isNotEmpty ||
+                                              _sharedLayerStrokes.isNotEmpty ||
+                                              _strokeEngine.activeLayerStroke !=
+                                                  null;
+                                          final viewerContent = SizedBox(
+                                            width: constraints.maxWidth,
+                                            height: constraints.maxHeight,
+                                            child: Stack(
+                                              fit: StackFit.expand,
+                                              children: [
+                                                RepaintBoundary(
+                                                  child: imageWidget,
+                                                ),
+                                                if (shouldShowStrokeOverlay)
+                                                  IgnorePointer(
+                                                    child: RepaintBoundary(
+                                                      child: CustomPaint(
+                                                        painter: _LiveCueSketchPainter(
+                                                          strokesProvider:
+                                                              _overlayStrokesForRender,
                                                           repaint:
                                                               _strokeRevision,
                                                         ),
-                                                  ),
-                                                ),
-                                              ),
-                                            if (_drawingEnabled && canEdit)
-                                              GestureDetector(
-                                                behavior:
-                                                    HitTestBehavior.opaque,
-                                                onTapDown: (details) {
-                                                  if (_eraserEnabled) {
-                                                    _eraseLayerAt(
-                                                      details.localPosition,
-                                                      canvasSize,
-                                                    );
-                                                    return;
-                                                  }
-                                                  _tapLayerStroke(
-                                                    details,
-                                                    canvasSize,
-                                                  );
-                                                },
-                                                onPanStart: (details) {
-                                                  if (_eraserEnabled) {
-                                                    _eraseLayerAt(
-                                                      details.localPosition,
-                                                      canvasSize,
-                                                    );
-                                                    return;
-                                                  }
-                                                  _startLayerStroke(
-                                                    details,
-                                                    canvasSize,
-                                                  );
-                                                },
-                                                onPanUpdate: (details) {
-                                                  if (_eraserEnabled) {
-                                                    _eraseLayerAt(
-                                                      details.localPosition,
-                                                      canvasSize,
-                                                    );
-                                                    return;
-                                                  }
-                                                  _appendLayerStroke(
-                                                    details,
-                                                    canvasSize,
-                                                  );
-                                                },
-                                                onPanEnd: (_) {
-                                                  if (!_eraserEnabled) {
-                                                    _endLayerStroke();
-                                                  }
-                                                },
-                                                onPanCancel: () {
-                                                  if (!_eraserEnabled) {
-                                                    _endLayerStroke();
-                                                  }
-                                                },
-                                              ),
-                                          ],
-                                        ),
-                                      );
-                                      final viewWidget =
-                                          _drawingEnabled && canEdit
-                                          ? viewerContent
-                                          : InteractiveViewer(
-                                              transformationController:
-                                                  _viewerController,
-                                              minScale: 0.7,
-                                              maxScale: 8,
-                                              panEnabled: true,
-                                              scaleEnabled: true,
-                                              boundaryMargin:
-                                                  const EdgeInsets.all(320),
-                                              clipBehavior: Clip.none,
-                                              child: viewerContent,
-                                            );
-
-                                      return Center(
-                                        child: SizedBox(
-                                          width: constraints.maxWidth,
-                                          height: constraints.maxHeight,
-                                          child: Stack(
-                                            fit: StackFit.expand,
-                                            children: [
-                                              viewWidget,
-                                              if (kIsWeb &&
-                                                  _fallbackToHtmlImageElement &&
-                                                  _drawingEnabled &&
-                                                  canEdit)
-                                                Positioned(
-                                                  left: 16,
-                                                  right: 16,
-                                                  top: 12,
-                                                  child: Container(
-                                                    padding:
-                                                        const EdgeInsets.all(8),
-                                                    decoration: BoxDecoration(
-                                                      color: Colors.black87,
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                            8,
-                                                          ),
-                                                    ),
-                                                    child: const Text(
-                                                      '브라우저 렌더링 호환 모드(prefer)로 전환되어 필기 입력이 불안정할 수 있습니다.',
-                                                      textAlign:
-                                                          TextAlign.center,
-                                                      style: TextStyle(
-                                                        color: Colors.white70,
-                                                        fontSize: 12,
                                                       ),
                                                     ),
                                                   ),
-                                                ),
-                                            ],
-                                          ),
-                                        ),
+                                                if (_drawingEnabled && canEdit)
+                                                  Listener(
+                                                    behavior:
+                                                        HitTestBehavior.opaque,
+                                                    onPointerDown: (event) =>
+                                                        _handleDrawingPointerDown(
+                                                          event,
+                                                          canvasSize,
+                                                        ),
+                                                    onPointerMove: (event) =>
+                                                        _handleDrawingPointerMove(
+                                                          event,
+                                                          canvasSize,
+                                                        ),
+                                                    onPointerUp:
+                                                        _handleDrawingPointerUpOrCancel,
+                                                    onPointerCancel:
+                                                        _handleDrawingPointerUpOrCancel,
+                                                  ),
+                                              ],
+                                            ),
+                                          );
+                                          final viewWidget =
+                                              _drawingEnabled && canEdit
+                                              ? viewerContent
+                                              : InteractiveViewer(
+                                                  transformationController:
+                                                      _viewerController,
+                                                  minScale: 0.7,
+                                                  maxScale: 8,
+                                                  panEnabled: true,
+                                                  scaleEnabled: true,
+                                                  boundaryMargin:
+                                                      const EdgeInsets.all(320),
+                                                  clipBehavior: Clip.none,
+                                                  child: viewerContent,
+                                                );
+
+                                          return Center(
+                                            child: SizedBox(
+                                              width: constraints.maxWidth,
+                                              height: constraints.maxHeight,
+                                              child: Stack(
+                                                fit: StackFit.expand,
+                                                children: [
+                                                  viewWidget,
+                                                  if (kIsWeb &&
+                                                      _fallbackToHtmlImageElement &&
+                                                      _drawingEnabled &&
+                                                      canEdit)
+                                                    Positioned(
+                                                      left: 16,
+                                                      right: 16,
+                                                      top: 12,
+                                                      child: Container(
+                                                        padding:
+                                                            const EdgeInsets.all(
+                                                              8,
+                                                            ),
+                                                        decoration: BoxDecoration(
+                                                          color: Colors.black87,
+                                                          borderRadius:
+                                                              BorderRadius.circular(
+                                                                8,
+                                                              ),
+                                                        ),
+                                                        child: const Text(
+                                                          '브라우저 렌더링 호환 모드(prefer)로 전환되어 필기 입력이 불안정할 수 있습니다.',
+                                                          textAlign:
+                                                              TextAlign.center,
+                                                          style: TextStyle(
+                                                            color:
+                                                                Colors.white70,
+                                                            fontSize: 12,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
                                       );
                                     },
                                   );
@@ -2724,414 +2657,696 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
                               ),
                             ),
                           ),
-                          Positioned(
-                            top: 8,
-                            left: 8,
-                            child: IconButton(
-                              style: IconButton.styleFrom(
-                                backgroundColor: _showOverlay
-                                    ? Colors.black54
-                                    : Colors.black26,
-                              ),
-                              onPressed: () => Navigator.of(context).pop(),
-                              icon: const Icon(
-                                Icons.arrow_back,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                          if (_showOverlay)
-                            Positioned(
-                              top: 8,
-                              right: 8,
-                              child: Row(
-                                children: [
-                                  IconButton(
-                                    style: IconButton.styleFrom(
-                                      backgroundColor: Colors.black54,
-                                    ),
-                                    onPressed: canEdit
-                                        ? () => _moveByStep(
-                                            firestore,
-                                            canEdit,
-                                            items,
-                                            cueData,
-                                            -1,
-                                          )
-                                        : null,
-                                    icon: const Icon(
-                                      Icons.chevron_left,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  IconButton(
-                                    style: IconButton.styleFrom(
-                                      backgroundColor: Colors.black54,
-                                    ),
-                                    onPressed: canEdit
-                                        ? () => _moveByStep(
-                                            firestore,
-                                            canEdit,
-                                            items,
-                                            cueData,
-                                            1,
-                                          )
-                                        : null,
-                                    icon: const Icon(
-                                      Icons.chevron_right,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  if (canEdit) ...[
-                                    const SizedBox(width: 8),
-                                    IconButton(
-                                      style: IconButton.styleFrom(
-                                        backgroundColor: _drawingEnabled
-                                            ? Colors.white24
-                                            : Colors.black54,
-                                      ),
-                                      tooltip: _drawingEnabled
-                                          ? '필기 모드 끄기'
-                                          : '필기 모드 켜기',
-                                      onPressed: () =>
-                                          _setDrawingEnabled(!_drawingEnabled),
-                                      icon: Icon(
-                                        _drawingEnabled
-                                            ? Icons.edit_off_rounded
-                                            : Icons.draw_rounded,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  ],
-                                  if (canEdit && _drawingEnabled) ...[
-                                    const SizedBox(width: 8),
-                                    IconButton(
-                                      style: IconButton.styleFrom(
-                                        backgroundColor: Colors.black54,
-                                      ),
-                                      tooltip: _editingSharedLayer
-                                          ? '현재: 공유 레이어'
-                                          : '현재: 개인 레이어',
-                                      onPressed: () {
-                                        setState(() {
-                                          _editingSharedLayer =
-                                              !_editingSharedLayer;
-                                        });
-                                      },
-                                      icon: Icon(
-                                        _editingSharedLayer
-                                            ? Icons.groups_rounded
-                                            : Icons.person_rounded,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    IconButton(
-                                      style: IconButton.styleFrom(
-                                        backgroundColor: _eraserEnabled
-                                            ? Colors.white24
-                                            : Colors.black54,
-                                      ),
-                                      tooltip: _eraserEnabled
-                                          ? '지우개 모드'
-                                          : '펜 모드',
-                                      onPressed: () {
-                                        setState(() {
-                                          _eraserEnabled = !_eraserEnabled;
-                                          _activeLayerStroke = null;
-                                        });
-                                      },
-                                      icon: Icon(
-                                        _eraserEnabled
-                                            ? Icons.cleaning_services_rounded
-                                            : Icons.brush_rounded,
-                                        color: Colors.white,
-                                      ),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                            ),
-                          if (_showOverlay)
-                            Positioned(
-                              left: 16,
-                              right: 16,
-                              bottom: 12,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                  vertical: 10,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: Colors.black54,
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.start,
+                          Positioned.fill(
+                            child: AnimatedBuilder(
+                              animation: Listenable.merge(<Listenable>[
+                                _overlayRevision,
+                                _toolRevision,
+                              ]),
+                              builder: (context, child) {
+                                return Stack(
+                                  fit: StackFit.expand,
                                   children: [
-                                    Text(
-                                      _lineText(
-                                        label: currentLabel,
-                                        title: currentTitle,
-                                        keyText: currentKey,
-                                      ),
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.w700,
+                                    Positioned(
+                                      top: 8,
+                                      left: 8,
+                                      child: IconButton(
+                                        style: IconButton.styleFrom(
+                                          backgroundColor: _showOverlay
+                                              ? Colors.black54
+                                              : Colors.black26,
+                                        ),
+                                        onPressed: _handleBackNavigation,
+                                        icon: const Icon(
+                                          Icons.arrow_back,
+                                          color: Colors.white,
+                                        ),
                                       ),
                                     ),
-                                    if (currentSongId != null &&
-                                        currentSongId.isNotEmpty)
-                                      FutureBuilder<List<String>>(
-                                        future: _loadAvailableKeysCached(
-                                          firestore,
-                                          currentSongId,
+                                    if (canEdit && _drawingEnabled)
+                                      Positioned(
+                                        top: 8,
+                                        right: 8,
+                                        child: IconButton(
+                                          style: IconButton.styleFrom(
+                                            backgroundColor:
+                                                _showDrawingToolPanel
+                                                ? Colors.white24
+                                                : Colors.black54,
+                                          ),
+                                          tooltip: _showDrawingToolPanel
+                                              ? '도구 패널 숨기기'
+                                              : '도구 패널 보기',
+                                          onPressed: _toggleDrawingToolPanel,
+                                          icon: Icon(
+                                            _showDrawingToolPanel
+                                                ? Icons
+                                                      .keyboard_arrow_down_rounded
+                                                : Icons.tune_rounded,
+                                            color: Colors.white,
+                                          ),
                                         ),
-                                        builder: (context, keySnapshot) {
-                                          final keys =
-                                              keySnapshot.data ??
-                                              const <String>[];
-                                          if (keys.length <= 1) {
-                                            return const SizedBox.shrink();
-                                          }
-                                          final selectedKey =
-                                              cueData['currentKeyText']
-                                                  ?.toString() ??
-                                              '';
-                                          return Padding(
-                                            padding: const EdgeInsets.only(
-                                              top: 8,
+                                      ),
+                                    if (_showOverlay)
+                                      Positioned(
+                                        top: 8,
+                                        right: canEdit && _drawingEnabled
+                                            ? 56
+                                            : 8,
+                                        child: Row(
+                                          children: [
+                                            IconButton(
+                                              style: IconButton.styleFrom(
+                                                backgroundColor: Colors.black54,
+                                              ),
+                                              onPressed: canEdit
+                                                  ? () => _moveByStep(
+                                                      firestore,
+                                                      canEdit,
+                                                      items,
+                                                      cueData,
+                                                      -1,
+                                                    )
+                                                  : null,
+                                              icon: const Icon(
+                                                Icons.chevron_left,
+                                                color: Colors.white,
+                                              ),
                                             ),
-                                            child: Wrap(
-                                              spacing: 8,
-                                              runSpacing: 8,
-                                              children: keys
-                                                  .map(
-                                                    (key) => ChoiceChip(
-                                                      label: Text(key),
-                                                      selected:
-                                                          normalizeKeyText(
-                                                            selectedKey,
-                                                          ) ==
-                                                          normalizeKeyText(key),
-                                                      onSelected: canEdit
-                                                          ? (_) =>
-                                                                _setCurrentKey(
-                                                                  firestore,
-                                                                  canEdit,
-                                                                  key,
-                                                                )
-                                                          : null,
+                                            const SizedBox(width: 8),
+                                            IconButton(
+                                              style: IconButton.styleFrom(
+                                                backgroundColor: Colors.black54,
+                                              ),
+                                              onPressed: canEdit
+                                                  ? () => _moveByStep(
+                                                      firestore,
+                                                      canEdit,
+                                                      items,
+                                                      cueData,
+                                                      1,
+                                                    )
+                                                  : null,
+                                              icon: const Icon(
+                                                Icons.chevron_right,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                            if (canEdit) ...[
+                                              const SizedBox(width: 8),
+                                              IconButton(
+                                                style: IconButton.styleFrom(
+                                                  backgroundColor:
+                                                      _drawingEnabled
+                                                      ? Colors.white24
+                                                      : Colors.black54,
+                                                ),
+                                                tooltip: _drawingEnabled
+                                                    ? '필기 모드 끄기'
+                                                    : '필기 모드 켜기',
+                                                onPressed: () =>
+                                                    _setDrawingEnabled(
+                                                      !_drawingEnabled,
                                                     ),
-                                                  )
-                                                  .toList(),
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    if (_loadingNoteLayers) ...[
-                                      const SizedBox(height: 8),
-                                      const LinearProgressIndicator(
-                                        minHeight: 2,
-                                      ),
-                                    ],
-                                    const SizedBox(height: 8),
-                                    Wrap(
-                                      spacing: 8,
-                                      runSpacing: 8,
-                                      children: [
-                                        FilterChip(
-                                          label: const Text('개인 레이어'),
-                                          selected: _showPrivateLayer,
-                                          onSelected: (value) {
-                                            setState(() {
-                                              _showPrivateLayer = value;
-                                            });
-                                          },
-                                        ),
-                                        FilterChip(
-                                          label: const Text('공유 레이어'),
-                                          selected: _showSharedLayer,
-                                          onSelected: (value) {
-                                            setState(() {
-                                              _showSharedLayer = value;
-                                            });
-                                          },
-                                        ),
-                                        if (canEdit)
-                                          FilledButton.tonalIcon(
-                                            onPressed: () => _setDrawingEnabled(
-                                              !_drawingEnabled,
-                                            ),
-                                            icon: Icon(
-                                              _drawingEnabled
-                                                  ? Icons.edit_off_rounded
-                                                  : Icons.draw_rounded,
-                                            ),
-                                            label: Text(
-                                              _drawingEnabled
-                                                  ? '필기 모드 종료'
-                                                  : '필기 모드 시작',
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                    if (canEdit && _drawingEnabled) ...[
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        _editingSharedLayer
-                                            ? '공유 레이어 편집 중 (팀원 모두에게 공유)'
-                                            : '개인 레이어 편집 중 (나만 보임)',
-                                        style: const TextStyle(
-                                          color: Colors.white70,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        children: [
-                                          ChoiceChip(
-                                            label: const Text('펜'),
-                                            selected: !_eraserEnabled,
-                                            onSelected: (_) {
-                                              setState(() {
-                                                _eraserEnabled = false;
-                                              });
-                                            },
-                                          ),
-                                          ChoiceChip(
-                                            label: const Text('지우개'),
-                                            selected: _eraserEnabled,
-                                            onSelected: (_) {
-                                              setState(() {
-                                                _eraserEnabled = true;
-                                                _activeLayerStroke = null;
-                                              });
-                                            },
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 6),
-                                      if (_eraserEnabled)
-                                        const Text(
-                                          '선을 문지르면 해당 획이 지워집니다.',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      if (_eraserEnabled)
-                                        const SizedBox(height: 8),
-                                      if (!_eraserEnabled)
-                                        Wrap(
-                                          spacing: 8,
-                                          runSpacing: 8,
-                                          children: _liveCueDrawingPalette
-                                              .map(
-                                                (colorValue) => GestureDetector(
-                                                  onTap: () {
-                                                    setState(() {
-                                                      _drawingColorValue =
-                                                          colorValue;
-                                                    });
-                                                  },
-                                                  child: Container(
-                                                    width: 26,
-                                                    height: 26,
-                                                    decoration: BoxDecoration(
-                                                      color: Color(colorValue),
-                                                      borderRadius:
-                                                          BorderRadius.circular(
-                                                            13,
-                                                          ),
-                                                      border: Border.all(
-                                                        color:
-                                                            _drawingColorValue ==
-                                                                colorValue
-                                                            ? Colors.white
-                                                            : Colors.white38,
-                                                        width:
-                                                            _drawingColorValue ==
-                                                                colorValue
-                                                            ? 2
-                                                            : 1,
+                                                icon: Icon(
+                                                  _drawingEnabled
+                                                      ? Icons.edit_off_rounded
+                                                      : Icons.draw_rounded,
+                                                  color: Colors.white,
+                                                ),
+                                              ),
+                                            ],
+                                            if (canEdit && _drawingEnabled) ...[
+                                              const SizedBox(width: 8),
+                                              IconButton(
+                                                style: IconButton.styleFrom(
+                                                  backgroundColor:
+                                                      Colors.black54,
+                                                ),
+                                                tooltip: _editingSharedLayer
+                                                    ? '현재: 공유 레이어'
+                                                    : '현재: 개인 레이어',
+                                                onPressed: () =>
+                                                    _setEditingSharedLayer(
+                                                      !_editingSharedLayer,
+                                                    ),
+                                                icon: Icon(
+                                                  _editingSharedLayer
+                                                      ? Icons.groups_rounded
+                                                      : Icons.person_rounded,
+                                                  color: Colors.white,
+                                                ),
+                                              ),
+                                              if (!(kIsWeb &&
+                                                  _useNextViewer)) ...[
+                                                const SizedBox(width: 8),
+                                                IconButton(
+                                                  style: IconButton.styleFrom(
+                                                    backgroundColor:
+                                                        _eraserEnabled
+                                                        ? Colors.white24
+                                                        : Colors.black54,
+                                                  ),
+                                                  tooltip: _eraserEnabled
+                                                      ? '지우개 모드'
+                                                      : '펜 모드',
+                                                  onPressed: () =>
+                                                      _setEraserEnabled(
+                                                        !_eraserEnabled,
                                                       ),
-                                                    ),
+                                                  icon: Icon(
+                                                    _eraserEnabled
+                                                        ? Icons
+                                                              .cleaning_services_rounded
+                                                        : Icons.brush_rounded,
+                                                    color: Colors.white,
                                                   ),
                                                 ),
-                                              )
-                                              .toList(),
+                                              ],
+                                            ],
+                                          ],
                                         ),
-                                      const SizedBox(height: 8),
-                                      Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        crossAxisAlignment:
-                                            WrapCrossAlignment.center,
-                                        children: [
-                                          ...<double>[1.8, 2.8, 4.2, 6.0].map(
-                                            (width) => ChoiceChip(
-                                              label: Text(
-                                                '펜 ${width.toStringAsFixed(width == 6.0 ? 0 : 1)}',
-                                              ),
-                                              selected:
-                                                  (_drawingStrokeWidth - width)
-                                                      .abs() <
-                                                  0.05,
-                                              onSelected: (_) {
-                                                setState(() {
-                                                  _drawingStrokeWidth = width;
-                                                });
-                                              },
-                                            ),
-                                          ),
-                                          OutlinedButton.icon(
-                                            onPressed: _undoLayerStroke,
-                                            icon: const Icon(
-                                              Icons.undo_rounded,
-                                            ),
-                                            label: const Text('되돌리기'),
-                                          ),
-                                          OutlinedButton.icon(
-                                            onPressed: _clearLayerStroke,
-                                            icon: const Icon(
-                                              Icons.delete_sweep_rounded,
-                                            ),
-                                            label: const Text('레이어 지우기'),
-                                          ),
-                                          FilledButton.icon(
-                                            onPressed: _savingNoteLayers
-                                                ? null
-                                                : () => _saveLayerNotes(
-                                                    firestore,
-                                                    user.uid,
-                                                  ),
-                                            icon: _savingNoteLayers
-                                                ? const SizedBox(
-                                                    width: 14,
-                                                    height: 14,
-                                                    child:
-                                                        CircularProgressIndicator(
-                                                          strokeWidth: 2,
-                                                        ),
-                                                  )
-                                                : const Icon(
-                                                    Icons.save_rounded,
-                                                  ),
-                                            label: const Text('레이어 저장'),
-                                          ),
-                                        ],
                                       ),
-                                    ],
+                                    if (_showOverlay &&
+                                        (!_drawingEnabled ||
+                                            _showDrawingToolPanel))
+                                      Positioned(
+                                        left: 12,
+                                        bottom: 12,
+                                        child: ConstrainedBox(
+                                          constraints: BoxConstraints(
+                                            maxWidth:
+                                                (MediaQuery.of(
+                                                          context,
+                                                        ).size.width -
+                                                        24)
+                                                    .clamp(
+                                                      280.0,
+                                                      _drawingEnabled
+                                                          ? 460.0
+                                                          : 380.0,
+                                                    )
+                                                    .toDouble(),
+                                            maxHeight:
+                                                MediaQuery.of(
+                                                  context,
+                                                ).size.height *
+                                                (_drawingEnabled &&
+                                                        _showDrawingToolPanel
+                                                    ? 0.68
+                                                    : 0.56),
+                                          ),
+                                          child: RepaintBoundary(
+                                            child: Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 10,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: Colors.black54,
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                              ),
+                                              child: SingleChildScrollView(
+                                                child: Column(
+                                                  mainAxisSize:
+                                                      MainAxisSize.min,
+                                                  crossAxisAlignment:
+                                                      CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      _lineText(
+                                                        label: currentLabel,
+                                                        title: currentTitle,
+                                                        keyText: currentKey,
+                                                      ),
+                                                      style: const TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 16,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                    if (currentSongId != null &&
+                                                        currentSongId
+                                                            .isNotEmpty)
+                                                      FutureBuilder<
+                                                        List<String>
+                                                      >(
+                                                        future:
+                                                            _loadAvailableKeysCached(
+                                                              firestore,
+                                                              currentSongId,
+                                                            ),
+                                                        builder: (context, keySnapshot) {
+                                                          final keys =
+                                                              keySnapshot
+                                                                  .data ??
+                                                              const <String>[];
+                                                          if (keys.length <=
+                                                              1) {
+                                                            return const SizedBox.shrink();
+                                                          }
+                                                          final selectedKey =
+                                                              cueData['currentKeyText']
+                                                                  ?.toString() ??
+                                                              '';
+                                                          return Padding(
+                                                            padding:
+                                                                const EdgeInsets.only(
+                                                                  top: 8,
+                                                                ),
+                                                            child: Wrap(
+                                                              spacing: 8,
+                                                              runSpacing: 8,
+                                                              children: keys
+                                                                  .map(
+                                                                    (
+                                                                      key,
+                                                                    ) => ChoiceChip(
+                                                                      label:
+                                                                          Text(
+                                                                            key,
+                                                                          ),
+                                                                      selected:
+                                                                          normalizeKeyText(
+                                                                            selectedKey,
+                                                                          ) ==
+                                                                          normalizeKeyText(
+                                                                            key,
+                                                                          ),
+                                                                      onSelected:
+                                                                          canEdit
+                                                                          ? (
+                                                                              _,
+                                                                            ) => _setCurrentKey(
+                                                                              firestore,
+                                                                              canEdit,
+                                                                              key,
+                                                                            )
+                                                                          : null,
+                                                                    ),
+                                                                  )
+                                                                  .toList(),
+                                                            ),
+                                                          );
+                                                        },
+                                                      ),
+                                                    if (_loadingNoteLayers) ...[
+                                                      const SizedBox(height: 8),
+                                                      const LinearProgressIndicator(
+                                                        minHeight: 2,
+                                                      ),
+                                                    ],
+                                                    const SizedBox(height: 8),
+                                                    Wrap(
+                                                      spacing: 8,
+                                                      runSpacing: 8,
+                                                      children: [
+                                                        FilterChip(
+                                                          label: const Text(
+                                                            '개인 레이어',
+                                                          ),
+                                                          selected:
+                                                              _showPrivateLayer,
+                                                          onSelected: (value) =>
+                                                              _setLayerVisibility(
+                                                                showPrivateLayer:
+                                                                    value,
+                                                              ),
+                                                        ),
+                                                        FilterChip(
+                                                          label: const Text(
+                                                            '공유 레이어',
+                                                          ),
+                                                          selected:
+                                                              _showSharedLayer,
+                                                          onSelected: (value) =>
+                                                              _setLayerVisibility(
+                                                                showSharedLayer:
+                                                                    value,
+                                                              ),
+                                                        ),
+                                                        if (kIsWeb &&
+                                                            _useNextViewer)
+                                                          Chip(
+                                                            avatar: Icon(
+                                                              _nextViewerDirty
+                                                                  ? Icons
+                                                                        .sync_problem_rounded
+                                                                  : Icons
+                                                                        .verified_rounded,
+                                                              size: 16,
+                                                              color:
+                                                                  _nextViewerDirty
+                                                                  ? Colors
+                                                                        .orange
+                                                                        .shade200
+                                                                  : Colors
+                                                                        .lightGreenAccent,
+                                                            ),
+                                                            label: Text(
+                                                              _nextViewerDirty
+                                                                  ? '미저장 필기 있음'
+                                                                  : '필기 동기화 완료',
+                                                            ),
+                                                          ),
+                                                        if (kIsWeb &&
+                                                            _useNextViewer &&
+                                                            _nextViewerStatus !=
+                                                                null &&
+                                                            _nextViewerStatus!
+                                                                .isNotEmpty)
+                                                          Chip(
+                                                            label: Text(
+                                                              _nextViewerStatus!,
+                                                              overflow:
+                                                                  TextOverflow
+                                                                      .ellipsis,
+                                                            ),
+                                                          ),
+                                                        if (canEdit)
+                                                          FilledButton.tonalIcon(
+                                                            onPressed: () =>
+                                                                _setDrawingEnabled(
+                                                                  !_drawingEnabled,
+                                                                ),
+                                                            icon: Icon(
+                                                              _drawingEnabled
+                                                                  ? Icons
+                                                                        .edit_off_rounded
+                                                                  : Icons
+                                                                        .draw_rounded,
+                                                            ),
+                                                            label: Text(
+                                                              _drawingEnabled
+                                                                  ? '필기 모드 종료'
+                                                                  : '필기 모드 시작',
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                    if (canEdit &&
+                                                        _drawingEnabled) ...[
+                                                      const SizedBox(height: 8),
+                                                      Text(
+                                                        _editingSharedLayer
+                                                            ? '공유 레이어 편집 중 (팀원 모두에게 공유)'
+                                                            : '개인 레이어 편집 중 (나만 보임)',
+                                                        style: const TextStyle(
+                                                          color: Colors.white70,
+                                                          fontSize: 12,
+                                                        ),
+                                                      ),
+                                                      const SizedBox(height: 6),
+                                                      if (kIsWeb &&
+                                                          _useNextViewer) ...[
+                                                        const Text(
+                                                          'Next.js Viewer가 필기/지우개/되돌리기를 처리합니다. Host는 저장과 동기화만 담당합니다.',
+                                                          style: TextStyle(
+                                                            color:
+                                                                Colors.white70,
+                                                            fontSize: 12,
+                                                          ),
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 8,
+                                                        ),
+                                                        Wrap(
+                                                          spacing: 8,
+                                                          runSpacing: 8,
+                                                          children: [
+                                                            ChoiceChip(
+                                                              label: const Text(
+                                                                '개인 레이어 편집',
+                                                              ),
+                                                              selected:
+                                                                  !_editingSharedLayer,
+                                                              onSelected: (_) =>
+                                                                  _setEditingSharedLayer(
+                                                                    false,
+                                                                  ),
+                                                            ),
+                                                            ChoiceChip(
+                                                              label: const Text(
+                                                                '공유 레이어 편집',
+                                                              ),
+                                                              selected:
+                                                                  _editingSharedLayer,
+                                                              onSelected: (_) =>
+                                                                  _setEditingSharedLayer(
+                                                                    true,
+                                                                  ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 8,
+                                                        ),
+                                                        Align(
+                                                          alignment: Alignment
+                                                              .centerLeft,
+                                                          child: FilledButton.icon(
+                                                            onPressed:
+                                                                _savingNoteLayers
+                                                                ? null
+                                                                : () async {
+                                                                    final saved = await _saveLayerNotes(
+                                                                      notePersistence,
+                                                                      user.uid,
+                                                                      saveBothLayers:
+                                                                          true,
+                                                                    );
+                                                                    if (!saved ||
+                                                                        !mounted) {
+                                                                      return;
+                                                                    }
+                                                                    _nextViewerDirty =
+                                                                        false;
+                                                                    _nextViewerSyncRevision =
+                                                                        _nextViewerSyncRevision +
+                                                                        1;
+                                                                    _markViewerNeedsBuild();
+                                                                    _markOverlayNeedsBuild();
+                                                                  },
+                                                            icon:
+                                                                _savingNoteLayers
+                                                                ? const SizedBox(
+                                                                    width: 14,
+                                                                    height: 14,
+                                                                    child: CircularProgressIndicator(
+                                                                      strokeWidth:
+                                                                          2,
+                                                                    ),
+                                                                  )
+                                                                : const Icon(
+                                                                    Icons
+                                                                        .save_rounded,
+                                                                  ),
+                                                            label: const Text(
+                                                              '레이어 저장(개인+공유)',
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ] else ...[
+                                                        Wrap(
+                                                          spacing: 8,
+                                                          runSpacing: 8,
+                                                          children: [
+                                                            ChoiceChip(
+                                                              label: const Text(
+                                                                '펜',
+                                                              ),
+                                                              selected:
+                                                                  !_eraserEnabled,
+                                                              onSelected: (_) =>
+                                                                  _setEraserEnabled(
+                                                                    false,
+                                                                  ),
+                                                            ),
+                                                            ChoiceChip(
+                                                              label: const Text(
+                                                                '지우개',
+                                                              ),
+                                                              selected:
+                                                                  _eraserEnabled,
+                                                              onSelected: (_) =>
+                                                                  _setEraserEnabled(
+                                                                    true,
+                                                                  ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 6,
+                                                        ),
+                                                        if (_eraserEnabled)
+                                                          const Text(
+                                                            '선을 문지르면 해당 획이 지워집니다.',
+                                                            style: TextStyle(
+                                                              color: Colors
+                                                                  .white70,
+                                                              fontSize: 12,
+                                                            ),
+                                                          ),
+                                                        if (_eraserEnabled)
+                                                          const SizedBox(
+                                                            height: 8,
+                                                          ),
+                                                        if (!_eraserEnabled)
+                                                          Wrap(
+                                                            spacing: 8,
+                                                            runSpacing: 8,
+                                                            children: _liveCueDrawingPalette
+                                                                .map(
+                                                                  (
+                                                                    colorValue,
+                                                                  ) => GestureDetector(
+                                                                    onTap: () =>
+                                                                        _setDrawingColorValue(
+                                                                          colorValue,
+                                                                        ),
+                                                                    child: Container(
+                                                                      width: 26,
+                                                                      height:
+                                                                          26,
+                                                                      decoration: BoxDecoration(
+                                                                        color: Color(
+                                                                          colorValue,
+                                                                        ),
+                                                                        borderRadius:
+                                                                            BorderRadius.circular(
+                                                                              13,
+                                                                            ),
+                                                                        border: Border.all(
+                                                                          color:
+                                                                              _drawingColorValue ==
+                                                                                  colorValue
+                                                                              ? Colors.white
+                                                                              : Colors.white38,
+                                                                          width:
+                                                                              _drawingColorValue ==
+                                                                                  colorValue
+                                                                              ? 2
+                                                                              : 1,
+                                                                        ),
+                                                                      ),
+                                                                    ),
+                                                                  ),
+                                                                )
+                                                                .toList(),
+                                                          ),
+                                                        const SizedBox(
+                                                          height: 8,
+                                                        ),
+                                                        Wrap(
+                                                          spacing: 8,
+                                                          runSpacing: 8,
+                                                          crossAxisAlignment:
+                                                              WrapCrossAlignment
+                                                                  .center,
+                                                          children: <double>[1.8, 2.8, 4.2, 6.0]
+                                                              .map(
+                                                                (
+                                                                  width,
+                                                                ) => ChoiceChip(
+                                                                  label: Text(
+                                                                    '펜 ${width.toStringAsFixed(width == 6.0 ? 0 : 1)}',
+                                                                  ),
+                                                                  selected:
+                                                                      (_drawingStrokeWidth -
+                                                                              width)
+                                                                          .abs() <
+                                                                      0.05,
+                                                                  onSelected: (_) =>
+                                                                      _setDrawingStrokeWidth(
+                                                                        width,
+                                                                      ),
+                                                                ),
+                                                              )
+                                                              .toList(),
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 8,
+                                                        ),
+                                                        Wrap(
+                                                          spacing: 8,
+                                                          runSpacing: 8,
+                                                          children: [
+                                                            OutlinedButton.icon(
+                                                              onPressed:
+                                                                  _undoLayerStroke,
+                                                              icon: const Icon(
+                                                                Icons
+                                                                    .undo_rounded,
+                                                              ),
+                                                              label: const Text(
+                                                                '되돌리기',
+                                                              ),
+                                                            ),
+                                                            OutlinedButton.icon(
+                                                              onPressed:
+                                                                  _clearLayerStroke,
+                                                              icon: const Icon(
+                                                                Icons
+                                                                    .delete_sweep_rounded,
+                                                              ),
+                                                              label: const Text(
+                                                                '레이어 지우기',
+                                                              ),
+                                                            ),
+                                                            FilledButton.icon(
+                                                              onPressed:
+                                                                  _savingNoteLayers
+                                                                  ? null
+                                                                  : () async {
+                                                                      final saved = await _saveLayerNotes(
+                                                                        notePersistence,
+                                                                        user.uid,
+                                                                      );
+                                                                      if (!saved ||
+                                                                          !mounted) {
+                                                                        return;
+                                                                      }
+                                                                    },
+                                                              icon:
+                                                                  _savingNoteLayers
+                                                                  ? const SizedBox(
+                                                                      width: 14,
+                                                                      height:
+                                                                          14,
+                                                                      child: CircularProgressIndicator(
+                                                                        strokeWidth:
+                                                                            2,
+                                                                      ),
+                                                                    )
+                                                                  : const Icon(
+                                                                      Icons
+                                                                          .save_rounded,
+                                                                    ),
+                                                              label: Text(
+                                                                _editingSharedLayer
+                                                                    ? '공유 레이어 저장'
+                                                                    : '개인 레이어 저장',
+                                                              ),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ],
+                                                    ],
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
                                   ],
-                                ),
-                              ),
+                                );
+                              },
                             ),
+                          ),
                         ],
                       );
                     },
@@ -3146,11 +3361,312 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage> {
   }
 }
 
+typedef _LiveCuePreviewLoader =
+    Future<_LiveCueAssetPreview?> Function(
+      String songId,
+      String? keyText,
+      String? fallbackTitle,
+    );
+
+class _LiveCueRenderPresenter {
+  static const int _maxResolvedPreviewEntries = 28;
+  static const int _maxPrefetchedPreviewEntries = 40;
+
+  final bool isWeb;
+  final TransformationController viewerController = TransformationController();
+  final Map<String, Future<_LiveCueAssetPreview?>> _previewCache = {};
+  final Map<String, _LiveCueAssetPreview> _resolvedPreviewCache = {};
+  final Set<String> _prefetchedPreviewKeys = <String>{};
+  final Set<String> _queuedPrefetchKeys = <String>{};
+  final ListQueue<String> _previewCacheOrder = ListQueue<String>();
+  final ListQueue<String> _prefetchCacheOrder = ListQueue<String>();
+
+  bool showOverlay = true;
+  Timer? _overlayTimer;
+  bool useNextViewer;
+  bool _fallbackToHtmlImageElement = false;
+  bool _switchingImageRenderer = false;
+  String? _activeViewerAssetKey;
+  String? _activeImageRendererKey;
+
+  _LiveCueRenderPresenter({
+    required this.isWeb,
+    required bool initialUseNextViewer,
+  }) : useNextViewer = initialUseNextViewer;
+
+  bool get canUseNextViewer => isWeb && useNextViewer;
+  bool get fallbackToHtmlImageElement => _fallbackToHtmlImageElement;
+  bool get switchingImageRenderer => _switchingImageRenderer;
+
+  _LiveCueAssetPreview? cachedPreview(String cacheKey) =>
+      _resolvedPreviewCache[cacheKey];
+
+  void dispose() {
+    _overlayTimer?.cancel();
+    _previewCache.clear();
+    _resolvedPreviewCache.clear();
+    _prefetchedPreviewKeys.clear();
+    _queuedPrefetchKeys.clear();
+    _previewCacheOrder.clear();
+    _prefetchCacheOrder.clear();
+    viewerController.dispose();
+  }
+
+  String previewCacheKey(
+    String songId,
+    String? keyText,
+    String? fallbackTitle,
+  ) {
+    final normalized = (keyText == null || keyText.trim().isEmpty)
+        ? '-'
+        : normalizeKeyText(keyText);
+    final normalizedFallback =
+        (fallbackTitle == null || fallbackTitle.trim().isEmpty)
+        ? '-'
+        : normalizeQuery(fallbackTitle);
+    return '$songId::$normalized::$normalizedFallback';
+  }
+
+  Future<_LiveCueAssetPreview?> loadPreviewCached({
+    required String? songId,
+    required String? keyText,
+    required String? fallbackTitle,
+    required _LiveCuePreviewLoader loader,
+  }) {
+    final safeSongId = songId?.trim() ?? '';
+    final safeTitle = fallbackTitle?.trim() ?? '';
+    if (safeSongId.isEmpty && safeTitle.isEmpty) {
+      return Future.value(null);
+    }
+    final cacheKey = previewCacheKey(safeSongId, keyText, safeTitle);
+    final existing = _previewCache[cacheKey];
+    if (existing != null) return existing;
+    final future = loader(safeSongId, keyText, safeTitle)
+        .then((preview) {
+          if (preview == null) {
+            _previewCache.remove(cacheKey);
+            _resolvedPreviewCache.remove(cacheKey);
+            _previewCacheOrder.remove(cacheKey);
+          } else {
+            _resolvedPreviewCache[cacheKey] = preview;
+            _rememberResolvedPreview(cacheKey);
+          }
+          return preview;
+        })
+        .catchError((error, stackTrace) {
+          _previewCache.remove(cacheKey);
+          _resolvedPreviewCache.remove(cacheKey);
+          _previewCacheOrder.remove(cacheKey);
+          throw error;
+        });
+    _previewCache[cacheKey] = future;
+    return future;
+  }
+
+  void evictPreviewCache(
+    String songId,
+    String? keyText,
+    String? fallbackTitle,
+  ) {
+    final cacheKey = previewCacheKey(songId, keyText, fallbackTitle);
+    _previewCache.remove(cacheKey);
+    _resolvedPreviewCache.remove(cacheKey);
+    _prefetchedPreviewKeys.remove(cacheKey);
+    _queuedPrefetchKeys.remove(cacheKey);
+    _previewCacheOrder.remove(cacheKey);
+    _prefetchCacheOrder.remove(cacheKey);
+  }
+
+  void ensureViewerAssetKey(String key) {
+    if (_activeViewerAssetKey == key) return;
+    _activeViewerAssetKey = key;
+    viewerController.value = Matrix4.identity();
+  }
+
+  void syncImageRendererKey(String key) {
+    if (_activeImageRendererKey == key) return;
+    _activeImageRendererKey = key;
+    resetHtmlImageFallback();
+  }
+
+  void resetHtmlImageFallback() {
+    _fallbackToHtmlImageElement = false;
+    _switchingImageRenderer = false;
+  }
+
+  bool tryActivateHtmlImageFallback({
+    required bool hasInitialBytes,
+    required bool drawingEnabled,
+    required bool Function() isMounted,
+    required VoidCallback requestRebuild,
+  }) {
+    if (!isWeb ||
+        hasInitialBytes ||
+        drawingEnabled ||
+        _fallbackToHtmlImageElement ||
+        _switchingImageRenderer) {
+      return false;
+    }
+    _switchingImageRenderer = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!isMounted()) return;
+      _fallbackToHtmlImageElement = true;
+      _switchingImageRenderer = false;
+      requestRebuild();
+    });
+    return true;
+  }
+
+  void warmPreview({
+    required String? songId,
+    required String? keyText,
+    required String? fallbackTitle,
+    required BuildContext context,
+    required bool Function() isMounted,
+    required _LiveCuePreviewLoader loader,
+  }) {
+    final safeSongId = songId?.trim() ?? '';
+    final safeTitle = fallbackTitle?.trim() ?? '';
+    if (safeSongId.isEmpty && safeTitle.isEmpty) return;
+    final cacheKey = previewCacheKey(safeSongId, keyText, safeTitle);
+    final previewFuture = loadPreviewCached(
+      songId: safeSongId,
+      keyText: keyText,
+      fallbackTitle: safeTitle,
+      loader: loader,
+    );
+    _queuePreviewPrefetch(
+      cacheKey: cacheKey,
+      previewFuture: previewFuture,
+      context: context,
+      isMounted: isMounted,
+    );
+  }
+
+  void _queuePreviewPrefetch({
+    required String cacheKey,
+    required Future<_LiveCueAssetPreview?> previewFuture,
+    required BuildContext context,
+    required bool Function() isMounted,
+  }) {
+    if (_prefetchedPreviewKeys.contains(cacheKey)) return;
+    if (!_queuedPrefetchKeys.add(cacheKey)) return;
+    unawaited(
+      previewFuture
+          .then((preview) {
+            if (!isMounted() || preview == null || !preview.isImage) return;
+            final bytes = preview.initialBytes;
+            if ((bytes == null || bytes.isEmpty) && isWeb) {
+              return;
+            }
+            if (!context.mounted) return;
+            final ImageProvider<Object> provider =
+                bytes != null && bytes.isNotEmpty
+                ? MemoryImage(bytes)
+                : NetworkImage(preview.url);
+            unawaited(precacheImage(provider, context));
+            _rememberPrefetchedPreview(cacheKey);
+          })
+          .catchError((_) {
+            // Prefetch is best effort only.
+          })
+          .whenComplete(() {
+            _queuedPrefetchKeys.remove(cacheKey);
+          }),
+    );
+  }
+
+  void _rememberResolvedPreview(String cacheKey) {
+    _previewCacheOrder.remove(cacheKey);
+    _previewCacheOrder.addLast(cacheKey);
+    while (_previewCacheOrder.length > _maxResolvedPreviewEntries) {
+      final oldest = _previewCacheOrder.removeFirst();
+      _previewCache.remove(oldest);
+      _resolvedPreviewCache.remove(oldest);
+      _prefetchedPreviewKeys.remove(oldest);
+      _queuedPrefetchKeys.remove(oldest);
+      _prefetchCacheOrder.remove(oldest);
+    }
+  }
+
+  void _rememberPrefetchedPreview(String cacheKey) {
+    _prefetchCacheOrder.remove(cacheKey);
+    _prefetchCacheOrder.addLast(cacheKey);
+    _prefetchedPreviewKeys.add(cacheKey);
+    while (_prefetchCacheOrder.length > _maxPrefetchedPreviewEntries) {
+      final oldest = _prefetchCacheOrder.removeFirst();
+      _prefetchedPreviewKeys.remove(oldest);
+    }
+  }
+
+  void cancelOverlayAutoHide() {
+    _overlayTimer?.cancel();
+    _overlayTimer = null;
+  }
+
+  void scheduleOverlayAutoHide({
+    required bool drawingEnabled,
+    required bool Function() isMounted,
+    required VoidCallback requestRebuild,
+  }) {
+    if (drawingEnabled) return;
+    _overlayTimer?.cancel();
+    _overlayTimer = Timer(const Duration(seconds: 3), () {
+      if (!isMounted() || !showOverlay) return;
+      showOverlay = false;
+      requestRebuild();
+    });
+  }
+
+  void showOverlayTemporarily({
+    required bool drawingEnabled,
+    required bool Function() isMounted,
+    required VoidCallback requestRebuild,
+  }) {
+    final shouldRebuild = !showOverlay;
+    showOverlay = true;
+    if (shouldRebuild) {
+      requestRebuild();
+    }
+    scheduleOverlayAutoHide(
+      drawingEnabled: drawingEnabled,
+      isMounted: isMounted,
+      requestRebuild: requestRebuild,
+    );
+  }
+
+  void toggleOverlay({
+    required bool drawingEnabled,
+    required bool Function() isMounted,
+    required VoidCallback requestRebuild,
+  }) {
+    if (drawingEnabled) return;
+    if (showOverlay) {
+      cancelOverlayAutoHide();
+      showOverlay = false;
+      requestRebuild();
+      return;
+    }
+    showOverlay = true;
+    requestRebuild();
+    scheduleOverlayAutoHide(
+      drawingEnabled: drawingEnabled,
+      isMounted: isMounted,
+      requestRebuild: requestRebuild,
+    );
+  }
+}
+
 class _LiveCueContext {
   final DocumentSnapshot<Map<String, dynamic>> project;
   final DocumentSnapshot<Map<String, dynamic>> member;
+  final bool isTeamCreator;
 
-  const _LiveCueContext({required this.project, required this.member});
+  const _LiveCueContext({
+    required this.project,
+    required this.member,
+    required this.isTeamCreator,
+  });
 }
 
 class _LiveCueAssetPreview {
@@ -3172,12 +3688,13 @@ class _LiveCueAssetPreview {
 }
 
 class _LiveCueSketchPainter extends CustomPainter {
-  final List<_LiveCueSketchStroke> strokes;
+  final List<SketchStroke> Function() strokesProvider;
 
-  _LiveCueSketchPainter({required this.strokes, super.repaint});
+  _LiveCueSketchPainter({required this.strokesProvider, super.repaint});
 
   @override
   void paint(Canvas canvas, Size size) {
+    final strokes = strokesProvider();
     for (final stroke in strokes) {
       if (stroke.points.isEmpty) continue;
       final paint = Paint()
@@ -3214,76 +3731,6 @@ class _LiveCueSketchPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _LiveCueSketchPainter oldDelegate) {
-    return oldDelegate.strokes != strokes;
-  }
-}
-
-class _LiveCueNotePayload {
-  final String text;
-  final List<_LiveCueSketchStroke> strokes;
-
-  _LiveCueNotePayload({this.text = '', List<_LiveCueSketchStroke>? strokes})
-    : strokes = strokes ?? <_LiveCueSketchStroke>[];
-
-  factory _LiveCueNotePayload.fromMap(Map<String, dynamic> data) {
-    return _LiveCueNotePayload(
-      text: data['content']?.toString() ?? '',
-      strokes: _LiveCueSketchStroke.decodeList(data['drawingStrokes']),
-    );
-  }
-}
-
-class _LiveCueSketchStroke {
-  final List<Offset> points;
-  final int colorValue;
-  final double width;
-
-  _LiveCueSketchStroke({
-    required this.points,
-    required this.colorValue,
-    required this.width,
-  });
-
-  Map<String, dynamic> toMap() {
-    return {
-      'colorValue': colorValue,
-      'width': width,
-      'points': points
-          .map(
-            (point) => {
-              'x': point.dx.clamp(0.0, 1.0),
-              'y': point.dy.clamp(0.0, 1.0),
-            },
-          )
-          .toList(),
-    };
-  }
-
-  static List<_LiveCueSketchStroke> decodeList(dynamic raw) {
-    if (raw is! List) return <_LiveCueSketchStroke>[];
-    final decoded = <_LiveCueSketchStroke>[];
-    for (final item in raw) {
-      if (item is! Map) continue;
-      final width = (item['width'] as num?)?.toDouble() ?? 2.8;
-      final colorValue = (item['colorValue'] as num?)?.toInt() ?? 0xFFD32F2F;
-      final pointsRaw = item['points'];
-      if (pointsRaw is! List) continue;
-      final points = <Offset>[];
-      for (final point in pointsRaw) {
-        if (point is! Map) continue;
-        final dx = (point['x'] as num?)?.toDouble() ?? 0;
-        final dy = (point['y'] as num?)?.toDouble() ?? 0;
-        points.add(Offset(dx.clamp(0.0, 1.0), dy.clamp(0.0, 1.0)));
-      }
-      if (points.isEmpty) continue;
-      decoded.add(
-        _LiveCueSketchStroke(
-          points: points,
-          colorValue: colorValue,
-          width: width,
-        ),
-      );
-    }
-    return decoded;
+    return oldDelegate.strokesProvider != strokesProvider;
   }
 }

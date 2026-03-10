@@ -10,7 +10,9 @@ class DefaultFirebaseOptions {
     }
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
+        return android;
       case TargetPlatform.iOS:
+        return ios;
       case TargetPlatform.macOS:
       case TargetPlatform.windows:
       case TargetPlatform.linux:
@@ -20,6 +22,23 @@ class DefaultFirebaseOptions {
         );
     }
   }
+
+  static const FirebaseOptions android = FirebaseOptions(
+    apiKey: 'AIzaSyDQKomVXXZXnMVRTYr7Uk4LsJB5Gy3mWME',
+    appId: '1:77945139809:android:11aac0260ab9c62eb4b020',
+    messagingSenderId: '77945139809',
+    projectId: 'worshipflow-df2ce',
+    storageBucket: 'worshipflow-df2ce.firebasestorage.app',
+  );
+
+  static const FirebaseOptions ios = FirebaseOptions(
+    apiKey: 'AIzaSyCZceXY50a7a6tAvuIfGRwftj-WWSN5ISQ',
+    appId: '1:77945139809:ios:a71fab3317caeb98b4b020',
+    messagingSenderId: '77945139809',
+    projectId: 'worshipflow-df2ce',
+    storageBucket: 'worshipflow-df2ce.firebasestorage.app',
+    iosBundleId: 'com.example.worshipflow',
+  );
 
   static const FirebaseOptions web = FirebaseOptions(
     apiKey: 'AIzaSyCmnJfKBXoS5GMvYoObQMvlUUd2lR7tUwU',

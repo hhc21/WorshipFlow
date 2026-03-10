@@ -1,66 +1,165 @@
-# Release Runbook
+# Release Runbook (SP-07 Release Gate)
 
 ## 1. Scope
-- This runbook defines staging/production release and rollback for WorshipFlow.
-- Source of truth branch: `main`.
+- This runbook defines release-gate checks before deployment and first-error/regression loop after deployment.
+- GitHub is used for backup/recovery only.
+- This runbook does not define new product features or architecture changes.
 
 ## 2. Preconditions
-- `PLAN-APPROVED` is confirmed.
-- Required PR review and CI checks are green.
-- Firebase rules (`firestore.rules`, `storage.rules`) changes are reviewed.
+- `plan.md` SP-07 baseline is approved.
+- No pending schema migration for canonical Firestore path (`teams/{teamId}/projects/{projectId}/...`).
+- LiveCue engine structural change is not included in this release batch.
 
-## 3. Environment Secrets
-Set these separately in GitHub Environments.
+## 2.1 Evidence Record (Required Fields)
+Every release-gate evidence item must include:
+- timestamp (KST)
+- build version (and release version if available)
+- log reference (file path, console capture, or CI URL)
+- screenshot/video linkage
 
-### staging
-- `FIREBASE_PROJECT_ID`
-- `FIREBASE_SERVICE_ACCOUNT_JSON` (recommended) or `FIREBASE_TOKEN` (temporary)
+Rule:
+- A gate is not treated as fully executed until these fields are recorded.
 
-### production
-- `FIREBASE_PROJECT_ID`
-- `FIREBASE_SERVICE_ACCOUNT_JSON` (recommended) or `FIREBASE_TOKEN` (temporary)
-- Required reviewers enabled
+## 3. Static Validation Gate (Required)
+Run all commands and record output timestamp:
+1. `flutter analyze`
+2. `flutter test --reporter=compact`
+3. `bash scripts/ci/test_rules.sh`
 
-## 4. Staging Release
-1. Merge approved PR into `main`.
-2. Run `deploy-staging` workflow.
-3. Verify app health on staging URL.
-4. Verify deployment build flags:
-   - confirm workflow log includes `--dart-define=WF_FIRESTORE_TRANSPORT=long-polling`
-5. Verify Storage CORS before LiveCue validation:
-   - current bucket CORS must match `scripts/storage_cors.json`
-   - if mismatch, re-apply CORS and re-run smoke checks
-4. Run smoke checks:
-   - login
-   - team select/team home
-   - project create/open
-   - live cue sheet open
-   - iPad Safari LiveCue smoke (`docs/livecue_repro_matrix.md` 기준 최소 1케이스)
+Gate rule:
+- Any failure blocks release.
 
-## 5. Production Release
-1. Create release tag from `main` (e.g., `v1.3.0`).
-2. Run `deploy-production` workflow with `release_ref` set to tag.
-   - `livecue_safari_smoke_result=pass`
-   - `livecue_safari_smoke_evidence=<issue/comment/video link>`
-   - build must include `--dart-define=WF_FIRESTORE_TRANSPORT=long-polling`
-3. Approve `production` environment deployment.
-4. Validate post-deploy smoke checks.
+Evidence record:
+- command execution timestamp (KST)
+- build version used for verification
+- command output log reference
+- optional screenshot/video linkage for CI execution
 
-## 6. Rollback
-1. Select previous stable release tag.
-2. Run `deploy-production` with previous tag as `release_ref`.
-3. Verify rollback smoke checks.
+## 4. Functional Gate (Web Runtime)
+Required flow checks:
+1. `/admin -> /teams/{teamId} -> /projects/{projectId} -> setlist -> LiveCue`
+2. setlist CRUD
+3. setlist reorder / cue move
+4. blank/loading/empty/error states
+5. invalid router id handling
+
+Evidence:
+- screen recording or screenshots for each flow
+- error message capture when negative cases are tested
+- execution timestamp (KST) per flow
+- build version
+- log reference (console/file path)
+
+## 5. Mobile Real-Device Resume Gate (SP-04 Deferred Items)
+Execute near release (pre-release or immediate post-release internal test):
+1. iPad + Apple Pencil long drawing session (>= 20 min)
+2. iPhone rotation + drawing session (>= 10 min)
+3. iOS shared-layer drawing read/write verification
+4. iOS local Google login re-verification
+
+Pass criteria:
+- white flicker / white-out reproduction: 0
+- drawing input loss: 0
+- first-error critical event: 0 in target scenario
+
+Evidence record:
+- scenario timestamp (KST)
+- device + OS + build version
+- log reference
+- screenshot/video linkage
+
+## 6. Runtime Observability Gate
+Confirm runtime metrics are emitted in target scenarios:
+- `runtime_guard_triggered`
+- `livecue_state_invalid`
+- `setlist_order_invalid`
+- `router_invalid_id`
+- `firestore_snapshot_error`
+- host-viewer guard values inside `runtime_guard_triggered.guard`:
+  - `host_viewer_contract_invalid`
+  - `viewer_target_origin_not_whitelisted`
+
+Validation rule:
+- Metrics must be observable in console/log capture when injecting negative scenarios.
+
+Evidence record:
+- validation timestamp (KST)
+- build version
+- log reference containing metric payload
+- screenshot linkage if UI trigger is involved
+
+## 7. First-Error / Regression Loop
+### 7.1 First-error definition
+- First critical error event observed in a session after deploy.
+- Priority order: `livecue_state_invalid` -> `setlist_order_invalid` -> `router_invalid_id` -> `firestore_snapshot_error`.
+
+### 7.2 Required regression checklist
+- current/next mismatch
+- setlist order discontinuity/duplication
+- invalid route id handling
+- snapshot null/not-found handling
+- fallback malfunction
+- long-session memory/input degradation
+
+### 7.3 Evidence template
+- timestamp (KST)
+- device/browser/build
+- reproduction conditions
+- first error log line
+- metric/log payload
+- video or screenshot link
+
+## 8. Fallback Operations Policy
+Principle:
+- Next Viewer is a fallback/support path, not the primary engine.
+
+Allow fallback when:
+- canonical path emits runtime guard failures in reproducible scenario
+- platform-specific rendering issue is confirmed
+- host-viewer contract validation passes
+
+Do not allow fallback when:
+- canonical path is healthy but fallback is forced by preference only
+- fallback evidence/metric is missing
+- fallback errors persist without exit criteria
+
+Return-to-canonical criteria:
+- canonical path passes same scenario twice consecutively
+- no new first-error event in those runs
+
+## 9. Large-File Change Governance
+Target large files:
+- `lib/features/projects/live_cue_page.dart`
+- `lib/features/teams/team_home_page.dart`
+- `lib/features/admin/global_admin_page.dart`
+
+Rules:
+- avoid full rewrite in one cycle
+- change by functional unit only
+- no large-file patch without tests
+- runtime-safe guard/observability patches first
+
+## 10. Backup / Recovery
+### 10.1 Backup
+1. Commit release candidate changes.
+2. Push to remote as backup snapshot.
+3. Record commit SHA/tag in release notes.
+
+### 10.2 Recovery
+1. Select previous stable backup SHA/tag.
+2. Restore local workspace from backup.
+3. Re-run static + functional gates.
 4. Record incident summary and corrective actions.
 
-Immediate rollback triggers (any one):
-- within 30 minutes after deploy, LC-SAF-01/04/05 has at least one FAIL
-- iPad Safari gray/black screen reproduced in 2+ independent sessions
-- pencil/touch drawing input loss reproduced once
-- score load failure caused by Firestore/Storage access error occurs 3 times in a row
+## 11. Immediate Rollback Triggers
+- Any critical first-error event reproduced in release-critical scenario.
+- white-out/white-flicker reproduced in production-like run.
+- input loss reproduced once in verified scenario.
+- score load failure caused by Firestore/Storage access error occurs 3 times in a row.
 
-## 7. Incident Notes
-When release fails due to auth/rules/cache:
-- Confirm environment secrets first.
-- Confirm rules were deployed with hosting.
-- Confirm browser cache behavior according to `docs/web_cache_strategy.md`.
-- For LiveCue incidents, follow `docs/livecue_incident_runbook.md`.
+## 12. Reference
+- `docs/livecue_repro_matrix.md`
+- `docs/livecue_incident_runbook.md`
+- `.github/workflows/ci.yml`
+- `.github/workflows/deploy_staging.yml`
+- `.github/workflows/deploy_prod.yml`

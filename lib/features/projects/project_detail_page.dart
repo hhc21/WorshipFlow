@@ -1,12 +1,12 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
+import '../../core/ops/ops_metrics.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
 import 'live_cue_page.dart';
@@ -26,7 +26,6 @@ class ProjectDetailPage extends ConsumerWidget {
   Future<_ProjectContext> _loadContext(
     FirebaseFirestore firestore,
     String userId,
-    User user,
   ) async {
     final projectRef = firestore
         .collection('teams')
@@ -41,29 +40,16 @@ class ProjectDetailPage extends ConsumerWidget {
         .doc(userId);
 
     final project = await projectRef.get().timeout(const Duration(seconds: 12));
-    var member = await memberRef.get().timeout(const Duration(seconds: 12));
+    final member = await memberRef.get().timeout(const Duration(seconds: 12));
     final team = await teamRef.get().timeout(const Duration(seconds: 12));
     final createdBy = (team.data()?['createdBy'] ?? '').toString();
-    if (!member.exists && team.exists && createdBy == userId) {
-      // Keep creator access resilient when legacy member docs are missing.
-      await memberRef.set({
-        'userId': userId,
-        'uid': userId,
-        'email': user.email?.toLowerCase(),
-        'displayName': user.displayName,
-        'nickname': null,
-        'role': 'admin',
-        'teamName': (team.data()?['name'] ?? '팀').toString(),
-        'capabilities': {'songEditor': true},
-        'createdAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-      await teamRef.set({
-        'memberUids': FieldValue.arrayUnion([userId]),
-      }, SetOptions(merge: true));
-      member = await memberRef.get().timeout(const Duration(seconds: 12));
-    }
+    final isTeamCreator = team.exists && createdBy == userId;
 
-    return _ProjectContext(project: project, member: member);
+    return _ProjectContext(
+      project: project,
+      member: member,
+      isTeamCreator: isTeamCreator,
+    );
   }
 
   Future<String?> _resolveFallbackProjectId(FirebaseFirestore firestore) async {
@@ -98,13 +84,21 @@ class ProjectDetailPage extends ConsumerWidget {
     final firestore = ref.watch(firestoreProvider);
 
     return FutureBuilder<_ProjectContext>(
-      future: _loadContext(firestore, user.uid, user),
+      future: _loadContext(firestore, user.uid),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(body: AppLoadingState(message: '프로젝트 로딩 중...'));
         }
         if (snapshot.hasError) {
           final error = snapshot.error;
+          OpsMetrics.firestoreSnapshotError(
+            fields: <String, Object?>{
+              'teamId': teamId,
+              'projectId': projectId,
+              'scope': 'project_context',
+              'error': error.toString(),
+            },
+          );
           if (error is FirebaseException &&
               (error.code == 'permission-denied' ||
                   error.code == 'not-found' ||
@@ -135,6 +129,10 @@ class ProjectDetailPage extends ConsumerWidget {
         }
         final contextData = snapshot.data;
         if (contextData == null || contextData.project.data() == null) {
+          OpsMetrics.runtimeGuardTriggered(
+            guard: 'project_context_missing',
+            fields: <String, Object?>{'teamId': teamId, 'projectId': projectId},
+          );
           return Scaffold(
             body: AppContentFrame(
               child: FutureBuilder<String?>(
@@ -162,7 +160,15 @@ class ProjectDetailPage extends ConsumerWidget {
             ),
           );
         }
-        if (!contextData.member.exists) {
+        if (!contextData.member.exists && !contextData.isTeamCreator) {
+          OpsMetrics.runtimeGuardTriggered(
+            guard: 'project_access_denied_non_member',
+            fields: <String, Object?>{
+              'teamId': teamId,
+              'projectId': projectId,
+              'uid': user.uid,
+            },
+          );
           return Scaffold(
             body: AppContentFrame(
               child: AppStateCard(
@@ -187,7 +193,7 @@ class ProjectDetailPage extends ConsumerWidget {
         final leaderId = projectData['leaderUserId']?.toString();
         final isLeader = leaderId == user.uid;
         final role = contextData.member.data()?['role']?.toString();
-        final isAdmin = isAdminRole(role);
+        final isAdmin = contextData.isTeamCreator || isAdminRole(role);
         final canEdit = isLeader || isAdmin;
         final roleLabel = isAdmin ? '팀장' : (isLeader ? '인도자' : '팀원');
 
@@ -298,6 +304,11 @@ class ProjectDetailPage extends ConsumerWidget {
 class _ProjectContext {
   final DocumentSnapshot<Map<String, dynamic>> project;
   final DocumentSnapshot<Map<String, dynamic>> member;
+  final bool isTeamCreator;
 
-  const _ProjectContext({required this.project, required this.member});
+  const _ProjectContext({
+    required this.project,
+    required this.member,
+    required this.isTeamCreator,
+  });
 }

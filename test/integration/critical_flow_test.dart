@@ -70,7 +70,7 @@ void main() {
   });
 
   testWidgets(
-    'critical: member-only record is loaded and membership mirror is restored',
+    'critical: member-only record is loaded without repairing mirrors',
     (tester) async {
       final firestore = FakeFirebaseFirestore();
       final auth = buildSignedInAuth(
@@ -126,9 +126,8 @@ void main() {
           const <String>[];
 
       expect(find.text('Alpha Team'), findsOneWidget);
-      expect(membershipMirror.exists, isTrue);
-      expect(membershipMirror.data()?['role'], 'admin');
-      expect(repairedMemberUids.contains('user-1'), isTrue);
+      expect(membershipMirror.exists, isFalse);
+      expect(repairedMemberUids.contains('user-1'), isFalse);
     },
   );
 }

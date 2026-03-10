@@ -11,6 +11,7 @@ fi
 
 python3 - "$CORS_FILE" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,13 @@ required_origins = {
     "http://localhost:7357",
     "http://localhost:8080",
 }
+extra_origins_raw = os.environ.get("WF_NEXT_VIEWER_ORIGINS", "")
+extra_origins = {
+    origin.strip()
+    for origin in extra_origins_raw.split(",")
+    if origin.strip()
+}
+required_origins.update(extra_origins)
 required_methods = {"GET", "HEAD", "OPTIONS"}
 required_headers = {"Content-Type", "Authorization"}
 
