@@ -705,7 +705,7 @@ LiveCue 및 핵심 동기화 구조는 runtime trace가 가능해야 한다.
 
 ## 7.5 현재 판정
 
-- 상태: **Release Candidate / 승인 대기**
+- 상태: **Release Candidate / 배포 완료 / 운영 모니터링 단계**
 - 의미:
   - static gate: PASS
   - device validation: 문서 PASS

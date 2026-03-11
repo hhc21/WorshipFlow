@@ -245,21 +245,113 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
         ).showSnackBar(const SnackBar(content: Text('악보 링크를 불러오지 못했습니다.')));
         return;
       }
-      final opened = openUrlInNewTab(url);
-      if (!opened && context.mounted) {
-        await copyTextWithFallback(
-          context,
-          text: url,
-          successMessage: '악보 링크 복사됨',
-          failureTitle: '악보 링크를 아래에서 복사하세요',
-        );
-      }
+      if (!context.mounted) return;
+      await _showAssetPreviewDialog(context, data, url);
     } catch (error) {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(explainStorageError(error, action: '악보 열기'))),
       );
     }
+  }
+
+  bool _isImageAsset(Map<String, dynamic> data) {
+    final contentType = data['contentType']?.toString().toLowerCase() ?? '';
+    final fileName = data['fileName']?.toString().toLowerCase() ?? '';
+    return contentType.startsWith('image/') ||
+        fileName.endsWith('.png') ||
+        fileName.endsWith('.jpg') ||
+        fileName.endsWith('.jpeg') ||
+        fileName.endsWith('.webp');
+  }
+
+  Future<void> _showAssetPreviewDialog(
+    BuildContext context,
+    Map<String, dynamic> data,
+    String url,
+  ) async {
+    final fileName = data['displayName']?.toString().trim().isNotEmpty == true
+        ? data['displayName'].toString().trim()
+        : (data['fileName']?.toString().trim().isNotEmpty == true
+              ? data['fileName'].toString().trim()
+              : '악보');
+    final isImage = _isImageAsset(data);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 960, maxHeight: 720),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  fileName,
+                  style: Theme.of(dialogContext).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: isImage
+                      ? Container(
+                          color: Colors.black12,
+                          child: InteractiveViewer(
+                            minScale: 0.6,
+                            maxScale: 4,
+                            child: Center(child: Image.network(url)),
+                          ),
+                        )
+                      : Container(
+                          color: Theme.of(
+                            dialogContext,
+                          ).colorScheme.surfaceContainerHighest,
+                          padding: const EdgeInsets.all(12),
+                          child: const Text(
+                            '이 파일 형식은 앱 내 미리보기를 지원하지 않습니다. 아래 버튼으로 새 탭에서 열거나 링크를 복사할 수 있습니다.',
+                          ),
+                        ),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('닫기'),
+                    ),
+                    FilledButton.tonal(
+                      onPressed: () => copyTextWithFallback(
+                        dialogContext,
+                        text: url,
+                        successMessage: '악보 링크 복사됨',
+                        failureTitle: '악보 링크를 아래에서 복사하세요',
+                      ),
+                      child: const Text('링크 복사'),
+                    ),
+                    FilledButton(
+                      onPressed: () {
+                        final opened = openUrlInNewTab(url);
+                        if (!opened) {
+                          copyTextWithFallback(
+                            dialogContext,
+                            text: url,
+                            successMessage: '악보 링크 복사됨',
+                            failureTitle: '악보 링크를 아래에서 복사하세요',
+                          );
+                        }
+                      },
+                      child: const Text('새 탭에서 열기'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _copyAssetLink(
@@ -474,7 +566,7 @@ class _GlobalSongPanelState extends ConsumerState<GlobalSongPanel> {
                                             icon: const Icon(
                                               Icons.open_in_new_rounded,
                                             ),
-                                            tooltip: '새 탭에서 열기',
+                                            tooltip: '미리보기',
                                             onPressed: () => _openAssetData(
                                               context,
                                               storage,

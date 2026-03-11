@@ -290,11 +290,30 @@ class LiveCueSyncCoordinator {
   }
 
   Future<void> dispose() async {
-    if (!isWeb) return;
-    _webPollingGeneration += 1;
-    await _cancelWebPollingSubscriptions();
-    await _webSetlistController?.close();
-    await _webCueController?.close();
+    if (isWeb) {
+      _webPollingGeneration += 1;
+      await _cancelWebPollingSubscriptions();
+      await _webSetlistController?.close();
+      await _webCueController?.close();
+      return;
+    }
+    _nativePollingGeneration += 1;
+    _nativePollingScopeKey = null;
+    _nativeSetlistStream = null;
+    _nativeCueStream = null;
+  }
+
+  Future<void> requestRetry() async {
+    if (isWeb) {
+      _trace('polling-retry-requested', generation: _webPollingGeneration);
+      _webPollingScopeKey = null;
+      await _cancelWebPollingSubscriptions();
+      return;
+    }
+    _trace('native-retry-requested', generation: _nativePollingGeneration);
+    _nativePollingScopeKey = null;
+    _nativeSetlistStream = null;
+    _nativeCueStream = null;
   }
 
   void _trace(String event, {int? generation, int? sequence, String? detail}) {

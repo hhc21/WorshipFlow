@@ -201,6 +201,7 @@ List<String> _candidateTitlesFromFallback(String? fallbackTitle) {
 
 Future<List<String>> _songIdCandidatesForPreview(
   FirebaseFirestore firestore,
+  String? teamId,
   String? preferredSongId,
   String? fallbackTitle,
 ) async {
@@ -240,6 +241,40 @@ Future<List<String>> _songIdCandidatesForPreview(
       }
     } catch (_) {
       // Ignore and keep already resolved candidates.
+    }
+
+    final safeTeamId = teamId?.trim() ?? '';
+    if (safeTeamId.isNotEmpty) {
+      try {
+        final byTitle = await firestore
+            .collection('teams')
+            .doc(safeTeamId)
+            .collection('songRefs')
+            .where('title', isEqualTo: title)
+            .limit(10)
+            .get();
+        for (final doc in byTitle.docs) {
+          addId(doc.data()['songId']?.toString().trim() ?? doc.id);
+        }
+      } catch (_) {
+        // Continue with available candidates.
+      }
+      if (normalizedTitle.isNotEmpty) {
+        try {
+          final bySearchToken = await firestore
+              .collection('teams')
+              .doc(safeTeamId)
+              .collection('songRefs')
+              .where('searchTokens', arrayContains: normalizedTitle)
+              .limit(10)
+              .get();
+          for (final doc in bySearchToken.docs) {
+            addId(doc.data()['songId']?.toString().trim() ?? doc.id);
+          }
+        } catch (_) {
+          // Continue with available candidates.
+        }
+      }
     }
   }
 
@@ -291,12 +326,14 @@ Future<Map<String, dynamic>> _cueFieldsFromSetlist(
 Future<_LiveCueAssetPreview?> _loadCurrentPreview(
   FirebaseFirestore firestore,
   FirebaseStorage storage,
+  String teamId,
   String? songId,
   String? keyText,
   String? fallbackTitle,
 ) async {
   final songIdCandidates = await _songIdCandidatesForPreview(
     firestore,
+    teamId,
     songId,
     fallbackTitle,
   );
@@ -471,6 +508,8 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   bool _saving = false;
   Timer? _cueWaitingTimer;
   DateTime? _cueWaitingSince;
+  bool _cueAutoRetryAttempted = false;
+  bool _cueAutoRetryPending = false;
 
   @override
   void initState() {
@@ -511,6 +550,31 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
     final startedAt = _cueWaitingSince;
     if (startedAt == null) return false;
     return DateTime.now().difference(startedAt) >= _cueSyncTimeout;
+  }
+
+  void _retryCueSync() {
+    _clearCueWaitingWatchdog();
+    _cueAutoRetryPending = false;
+    unawaited(_syncCoordinator.requestRetry());
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _scheduleCueAutoRetry() {
+    if (_cueAutoRetryAttempted || _cueAutoRetryPending) return;
+    _cueAutoRetryPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _cueAutoRetryAttempted = true;
+      _cueAutoRetryPending = false;
+      _retryCueSync();
+    });
+  }
+
+  void _resetCueRetryState() {
+    _cueAutoRetryAttempted = false;
+    _cueAutoRetryPending = false;
   }
 
   Future<List<String>> _loadAvailableKeysCached(
@@ -791,6 +855,12 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                           ConnectionState.waiting) {
                         _beginCueWaitingWatchdog();
                         if (_isCueWaitingTimedOut) {
+                          if (!_cueAutoRetryAttempted) {
+                            _scheduleCueAutoRetry();
+                            return const AppLoadingState(
+                              message: 'LiveCue 자동 재연결 시도 중...',
+                            );
+                          }
                           return AppStateCard(
                             icon: Icons.sync_problem_outlined,
                             isError: true,
@@ -798,7 +868,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                             message:
                                 '상태 문서를 읽지 못하고 있습니다. 권한/네트워크를 확인한 뒤 다시 시도해 주세요.',
                             actionLabel: '다시 시도',
-                            onAction: () => setState(() {}),
+                            onAction: _retryCueSync,
                           );
                         }
                         return const AppLoadingState(
@@ -807,16 +877,23 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                       }
                       _clearCueWaitingWatchdog();
                       if (cueSnapshot.hasError) {
+                        if (!_cueAutoRetryAttempted) {
+                          _scheduleCueAutoRetry();
+                          return const AppLoadingState(
+                            message: 'LiveCue 상태 복구 시도 중...',
+                          );
+                        }
                         return AppStateCard(
                           icon: Icons.sync_problem_outlined,
                           isError: true,
                           title: 'LiveCue 상태 로드 실패',
                           message: '${cueSnapshot.error}',
                           actionLabel: '다시 시도',
-                          onAction: () => setState(() {}),
+                          onAction: _retryCueSync,
                         );
                       }
 
+                      _resetCueRetryState();
                       final cueData = cueSnapshot.data?.data() ?? {};
                       _latestCueData = cueData;
                       if (items.isNotEmpty &&
@@ -1192,6 +1269,8 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   bool _showDrawingToolPanel = false;
   Timer? _cueWaitingTimer;
   DateTime? _cueWaitingSince;
+  bool _cueAutoRetryAttempted = false;
+  bool _cueAutoRetryPending = false;
   final ValueNotifier<int> _viewerRevision = ValueNotifier<int>(0);
   final ValueNotifier<int> _overlayRevision = ValueNotifier<int>(0);
   int? _previousImageCacheMaxEntries;
@@ -1364,6 +1443,33 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     return DateTime.now().difference(startedAt) >= _cueSyncTimeout;
   }
 
+  void _retryCueSync() {
+    _clearCueWaitingWatchdog();
+    _cueAutoRetryPending = false;
+    unawaited(_syncCoordinator.requestRetry());
+    if (mounted) {
+      _markViewerNeedsBuild();
+      _markOverlayNeedsBuild();
+      setState(() {});
+    }
+  }
+
+  void _scheduleCueAutoRetry() {
+    if (_cueAutoRetryAttempted || _cueAutoRetryPending) return;
+    _cueAutoRetryPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _cueAutoRetryAttempted = true;
+      _cueAutoRetryPending = false;
+      _retryCueSync();
+    });
+  }
+
+  void _resetCueRetryState() {
+    _cueAutoRetryAttempted = false;
+    _cueAutoRetryPending = false;
+  }
+
   void _syncViewerTokenOwner(User? user) {
     if (!_useNextViewer) {
       _stopViewerAuthSync();
@@ -1497,6 +1603,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         _loadCurrentPreview(
           firestore,
           storage,
+          widget.teamId,
           resolvedSongId,
           resolvedKeyText,
           resolvedFallbackTitle,
@@ -1539,6 +1646,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         _loadCurrentPreview(
           firestore,
           storage,
+          widget.teamId,
           resolvedSongId,
           resolvedKeyText,
           resolvedFallbackTitle,
@@ -2140,6 +2248,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                           ConnectionState.waiting) {
                         _beginCueWaitingWatchdog();
                         if (_isCueWaitingTimedOut) {
+                          if (!_cueAutoRetryAttempted) {
+                            _scheduleCueAutoRetry();
+                            return const Center(
+                              child: AppLoadingState(
+                                message: 'LiveCue 자동 재연결 시도 중...',
+                              ),
+                            );
+                          }
                           return Center(
                             child: ConstrainedBox(
                               constraints: const BoxConstraints(maxWidth: 520),
@@ -2150,7 +2266,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                 message:
                                     '상태 문서를 읽지 못하고 있습니다. 권한/네트워크를 확인한 뒤 다시 시도해 주세요.',
                                 actionLabel: '다시 시도',
-                                onAction: () => setState(() {}),
+                                onAction: _retryCueSync,
                               ),
                             ),
                           );
@@ -2161,14 +2277,30 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                       }
                       _clearCueWaitingWatchdog();
                       if (cueSnapshot.hasError) {
+                        if (!_cueAutoRetryAttempted) {
+                          _scheduleCueAutoRetry();
+                          return const Center(
+                            child: AppLoadingState(
+                              message: 'LiveCue 상태 복구 시도 중...',
+                            ),
+                          );
+                        }
                         return Center(
-                          child: Text(
-                            'LiveCue 상태 로드 실패: ${cueSnapshot.error}',
-                            style: const TextStyle(color: Colors.white),
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 520),
+                            child: AppStateCard(
+                              icon: Icons.sync_problem_outlined,
+                              isError: true,
+                              title: 'LiveCue 상태 로드 실패',
+                              message: '${cueSnapshot.error}',
+                              actionLabel: '다시 시도',
+                              onAction: _retryCueSync,
+                            ),
                           ),
                         );
                       }
 
+                      _resetCueRetryState();
                       final cueData = cueSnapshot.data?.data() ?? {};
                       _latestCueData = cueData;
                       if (items.isNotEmpty &&

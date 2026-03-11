@@ -779,6 +779,27 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     return unique.toList();
   }
 
+  List<String> _songTitleCandidatesForLookup(String rawTitle) {
+    final candidates = <String>{};
+    final seed = rawTitle.trim();
+    if (seed.isEmpty) return const [];
+
+    candidates.add(seed);
+    final strippedByCue = _parseCueInput(seed).songText.trim();
+    if (strippedByCue.isNotEmpty) {
+      candidates.add(strippedByCue);
+    }
+    final parsedSeed = parseSongInput(seed).title.trim();
+    if (parsedSeed.isNotEmpty) {
+      candidates.add(parsedSeed);
+    }
+    final parsedStripped = parseSongInput(strippedByCue).title.trim();
+    if (parsedStripped.isNotEmpty) {
+      candidates.add(parsedStripped);
+    }
+    return candidates.toList();
+  }
+
   Future<void> _openSheetForSetlistItem(
     BuildContext context,
     QueryDocumentSnapshot<Map<String, dynamic>> itemDoc,
@@ -792,22 +813,62 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     var songId = data['songId']?.toString().trim();
 
     if (songId == null || songId.isEmpty) {
-      final fallbackTitle =
-          (data['displayTitle'] ?? data['freeTextTitle'] ?? '')
-              .toString()
-              .trim();
-      if (fallbackTitle.isEmpty) {
+      final rawTitle = (data['displayTitle'] ?? data['freeTextTitle'] ?? '')
+          .toString()
+          .trim();
+      if (rawTitle.isEmpty) {
         if (!context.mounted) return;
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('곡 제목이 없어 악보를 열 수 없습니다.')));
         return;
       }
-      final matched = await _matchSongAutomatically(firestore, fallbackTitle);
+      final titleCandidates = _songTitleCandidatesForLookup(rawTitle);
+      SongCandidate? matched;
+      for (final candidateTitle in titleCandidates) {
+        matched = await _matchSongAutomatically(firestore, candidateTitle);
+        if (matched != null) break;
+      }
+      if (matched == null) {
+        for (final candidateTitle in titleCandidates) {
+          final refSnapshot = await firestore
+              .collection('teams')
+              .doc(widget.teamId)
+              .collection('songRefs')
+              .where('title', isEqualTo: candidateTitle)
+              .limit(1)
+              .get();
+          if (refSnapshot.docs.isEmpty) continue;
+          final refSongId = refSnapshot.docs.first
+              .data()['songId']
+              ?.toString()
+              .trim();
+          if (refSongId == null || refSongId.isEmpty) continue;
+          final songSnapshot = await firestore
+              .collection('songs')
+              .doc(refSongId)
+              .get();
+          if (!songSnapshot.exists) continue;
+          final songTitle = (songSnapshot.data()?['title'] ?? candidateTitle)
+              .toString();
+          matched = SongCandidate(id: refSongId, title: songTitle);
+          break;
+        }
+      }
       if (matched == null) {
         if (!context.mounted) return;
+        final keyHint = (rawKey == null || rawKey.isEmpty)
+            ? '키 없음'
+            : '키 ${normalizeKeyText(rawKey)}';
+        final attemptedTitle = titleCandidates.isEmpty
+            ? rawTitle
+            : titleCandidates.first;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('라이브러리에서 곡을 찾지 못했습니다. 제목을 확인해 주세요.')),
+          SnackBar(
+            content: Text(
+              '라이브러리 매칭 실패: "$attemptedTitle" ($keyHint). 제목/키를 확인해 주세요.',
+            ),
+          ),
         );
         return;
       }
