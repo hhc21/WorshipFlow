@@ -556,6 +556,15 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
           displayTitle = selected.title;
         }
       }
+      if (songId == null || songId.isEmpty) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('곡 라이브러리에서 정확히 매칭되지 않아 저장하지 않았습니다. 제목을 확인해 주세요.'),
+          ),
+        );
+        return;
+      }
 
       final setlistRef = firestore
           .collection('teams')
@@ -578,7 +587,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         'order': nextOrder,
         'cueLabel': cueInput.cueLabel ?? nextOrder.toString(),
         'songId': songId,
-        'freeTextTitle': songId == null ? parsed.title : null,
+        'freeTextTitle': null,
         'displayTitle': displayTitle,
         'keyText': parsed.keyText == null
             ? null
@@ -655,13 +664,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
       );
     }
 
-    return _ResolvedSetlistSong(
-      cueLabel: cueInput.cueLabel,
-      songId: null,
-      displayTitle: parsed.title,
-      freeTextTitle: parsed.title,
-      keyText: normalizedKey,
-    );
+    return const _ResolvedSetlistSong.invalid();
   }
 
   Future<void> _addSetlistItemsBulk(BuildContext context) async {
@@ -774,6 +777,55 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
       unique.add(link);
     }
     return unique.toList();
+  }
+
+  Future<void> _openSheetForSetlistItem(
+    BuildContext context,
+    QueryDocumentSnapshot<Map<String, dynamic>> itemDoc,
+  ) async {
+    final firestore = ref.read(firestoreProvider);
+    final data = itemDoc.data();
+    final rawKey = data['keyText']?.toString().trim();
+    final query = (rawKey == null || rawKey.isEmpty)
+        ? ''
+        : '?key=${Uri.encodeComponent(rawKey)}';
+    var songId = data['songId']?.toString().trim();
+
+    if (songId == null || songId.isEmpty) {
+      final fallbackTitle =
+          (data['displayTitle'] ?? data['freeTextTitle'] ?? '')
+              .toString()
+              .trim();
+      if (fallbackTitle.isEmpty) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('곡 제목이 없어 악보를 열 수 없습니다.')));
+        return;
+      }
+      final matched = await _matchSongAutomatically(firestore, fallbackTitle);
+      if (matched == null) {
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('라이브러리에서 곡을 찾지 못했습니다. 제목을 확인해 주세요.')),
+        );
+        return;
+      }
+      songId = matched.id;
+      await itemDoc.reference.set({
+        'songId': songId,
+        'displayTitle': matched.title,
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      if (context.mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('곡 연결을 복구했습니다.')));
+      }
+    }
+
+    if (!context.mounted) return;
+    context.go('/teams/${widget.teamId}/songs/$songId$query');
   }
 
   _CueInput _parseCueInput(String rawInput) {
@@ -1153,10 +1205,6 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                     if (referenceLinks.isNotEmpty) {
                       subtitleParts.add('레퍼런스 ${referenceLinks.length}개');
                     }
-                    final songId = data['songId']?.toString();
-                    final query = (key == null || key.isEmpty)
-                        ? ''
-                        : '?key=${Uri.encodeComponent(key)}';
                     return Container(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(14),
@@ -1209,14 +1257,14 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                                         newIndex: index + 1,
                                       ),
                               ),
-                            if (songId != null)
-                              IconButton(
-                                icon: const Icon(Icons.picture_as_pdf),
-                                tooltip: '악보 열기',
-                                onPressed: () => context.go(
-                                  '/teams/${widget.teamId}/songs/$songId$query',
-                                ),
+                            IconButton(
+                              icon: const Icon(Icons.picture_as_pdf),
+                              tooltip: '악보 열기',
+                              onPressed: () => _openSheetForSetlistItem(
+                                context,
+                                items[index],
                               ),
+                            ),
                             if (widget.canEdit)
                               IconButton(
                                 icon: const Icon(Icons.edit),

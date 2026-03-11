@@ -90,6 +90,11 @@ void main() {
   ) async {
     final firestore = FakeFirebaseFirestore();
     await seedProject(firestore);
+    await firestore.collection('songs').doc('song-test').set({
+      'title': '테스트곡',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['테스트곡'],
+    });
     await pumpSegmentAPage(tester, firestore);
 
     final setlistRef = firestore

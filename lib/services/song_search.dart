@@ -13,9 +13,12 @@ Future<List<SongCandidate>> findSongCandidates(
 ) async {
   if (normalizedTitle.isEmpty) return [];
 
+  final normalized = normalizedTitle.trim().toLowerCase();
+  if (normalized.isEmpty) return [];
+
   final tokenQuery = await firestore
       .collection('songs')
-      .where('searchTokens', arrayContains: normalizedTitle)
+      .where('searchTokens', arrayContains: normalized)
       .limit(10)
       .get();
 
@@ -29,21 +32,72 @@ Future<List<SongCandidate>> findSongCandidates(
       .toList();
   if (fromToken.isNotEmpty) return fromToken;
 
-  final fallback = await firestore.collection('songs').limit(200).get();
-  final normalized = normalizedTitle.trim().toLowerCase();
+  final exactTitleQuery = await firestore
+      .collection('songs')
+      .where('title', isEqualTo: normalizedTitle.trim())
+      .limit(10)
+      .get();
+  final fromExactTitle = exactTitleQuery.docs
+      .map(
+        (doc) => SongCandidate(
+          id: doc.id,
+          title: (doc.data()['title'] ?? '').toString(),
+        ),
+      )
+      .toList();
+  if (fromExactTitle.isNotEmpty) return fromExactTitle;
+
+  final aliasQuery = await firestore
+      .collection('songs')
+      .where('aliases', arrayContains: normalizedTitle.trim())
+      .limit(10)
+      .get();
+  final fromAlias = aliasQuery.docs
+      .map(
+        (doc) => SongCandidate(
+          id: doc.id,
+          title: (doc.data()['title'] ?? '').toString(),
+        ),
+      )
+      .toList();
+  if (fromAlias.isNotEmpty) return fromAlias;
+
   final matches = <SongCandidate>[];
-  for (final doc in fallback.docs) {
-    final title = (doc.data()['title'] ?? '').toString();
-    if (title.trim().toLowerCase() == normalized) {
-      matches.add(SongCandidate(id: doc.id, title: title));
-      continue;
+  QueryDocumentSnapshot<Map<String, dynamic>>? cursor;
+  var scanned = 0;
+  const pageSize = 200;
+  const maxScan = 2000;
+
+  while (scanned < maxScan) {
+    var query = firestore
+        .collection('songs')
+        .orderBy(FieldPath.documentId)
+        .limit(pageSize);
+    if (cursor != null) {
+      query = query.startAfterDocument(cursor);
     }
-    final aliases = (doc.data()['aliases'] as List?) ?? const [];
-    for (final alias in aliases) {
-      if (alias.toString().trim().toLowerCase() == normalized) {
+
+    final page = await query.get();
+    if (page.docs.isEmpty) break;
+
+    scanned += page.docs.length;
+    cursor = page.docs.last;
+    for (final doc in page.docs) {
+      final title = (doc.data()['title'] ?? '').toString();
+      if (title.trim().toLowerCase() == normalized) {
         matches.add(SongCandidate(id: doc.id, title: title));
-        break;
+        continue;
       }
+      final aliases = (doc.data()['aliases'] as List?) ?? const [];
+      for (final alias in aliases) {
+        if (alias.toString().trim().toLowerCase() == normalized) {
+          matches.add(SongCandidate(id: doc.id, title: title));
+          break;
+        }
+      }
+    }
+    if (matches.isNotEmpty) {
+      break;
     }
   }
   return matches;

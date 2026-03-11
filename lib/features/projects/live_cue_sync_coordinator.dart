@@ -413,7 +413,19 @@ class LiveCueSyncCoordinator {
         if (generation != _webPollingGeneration || setlistController.isClosed) {
           return;
         }
+        _trace(
+          'setlist-forward-error',
+          generation: generation,
+          detail: '$error',
+        );
         setlistController.addError(error, stackTrace);
+      },
+      onDone: () {
+        if (generation != _webPollingGeneration) {
+          return;
+        }
+        _trace('setlist-forward-done', generation: generation);
+        _webSetlistSubscription = null;
       },
     );
 
@@ -433,7 +445,15 @@ class LiveCueSyncCoordinator {
         if (generation != _webPollingGeneration || cueController.isClosed) {
           return;
         }
+        _trace('cue-forward-error', generation: generation, detail: '$error');
         cueController.addError(error, stackTrace);
+      },
+      onDone: () {
+        if (generation != _webPollingGeneration) {
+          return;
+        }
+        _trace('cue-forward-done', generation: generation);
+        _webCueSubscription = null;
       },
     );
     _trace('polling-switch-ready', generation: generation);
@@ -486,9 +506,20 @@ class LiveCueSyncCoordinator {
           );
           yield snapshot;
         }
-      } catch (_) {
+      } catch (error, stackTrace) {
+        _trace(
+          'setlist-poll-error',
+          generation: _webPollingGeneration,
+          detail: '$error',
+        );
         if (lastGoodSnapshot != null) {
           yield lastGoodSnapshot;
+        } else {
+          yield* Stream<QuerySnapshot<Map<String, dynamic>>>.error(
+            error,
+            stackTrace,
+          );
+          return;
         }
       }
       await Future<void>.delayed(webSetlistPollInterval);
@@ -517,9 +548,20 @@ class LiveCueSyncCoordinator {
           );
           yield snapshot;
         }
-      } catch (_) {
+      } catch (error, stackTrace) {
+        _trace(
+          'cue-poll-error',
+          generation: _webPollingGeneration,
+          detail: '$error',
+        );
         if (lastGoodSnapshot != null) {
           yield lastGoodSnapshot;
+        } else {
+          yield* Stream<DocumentSnapshot<Map<String, dynamic>>>.error(
+            error,
+            stackTrace,
+          );
+          return;
         }
       }
       await Future<void>.delayed(webCuePollInterval);

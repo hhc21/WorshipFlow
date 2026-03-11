@@ -460,6 +460,7 @@ class LiveCuePage extends ConsumerStatefulWidget {
 }
 
 class _LiveCuePageState extends ConsumerState<LiveCuePage> {
+  static const Duration _cueSyncTimeout = Duration(seconds: 15);
   final FocusNode _focusNode = FocusNode();
   final Map<String, Future<List<String>>> _songKeysFutureCache = {};
   late final LiveCueSyncCoordinator _syncCoordinator;
@@ -468,6 +469,8 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   Map<String, dynamic> _latestCueData = const <String, dynamic>{};
   bool _autoSeeding = false;
   bool _saving = false;
+  Timer? _cueWaitingTimer;
+  DateTime? _cueWaitingSince;
 
   @override
   void initState() {
@@ -485,8 +488,29 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   @override
   void dispose() {
     unawaited(_syncCoordinator.dispose());
+    _cueWaitingTimer?.cancel();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  void _beginCueWaitingWatchdog() {
+    _cueWaitingSince ??= DateTime.now();
+    _cueWaitingTimer ??= Timer(_cueSyncTimeout, () {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  void _clearCueWaitingWatchdog() {
+    _cueWaitingTimer?.cancel();
+    _cueWaitingTimer = null;
+    _cueWaitingSince = null;
+  }
+
+  bool get _isCueWaitingTimedOut {
+    final startedAt = _cueWaitingSince;
+    if (startedAt == null) return false;
+    return DateTime.now().difference(startedAt) >= _cueSyncTimeout;
   }
 
   Future<List<String>> _loadAvailableKeysCached(
@@ -765,10 +789,23 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                     builder: (context, cueSnapshot) {
                       if (cueSnapshot.connectionState ==
                           ConnectionState.waiting) {
+                        _beginCueWaitingWatchdog();
+                        if (_isCueWaitingTimedOut) {
+                          return AppStateCard(
+                            icon: Icons.sync_problem_outlined,
+                            isError: true,
+                            title: 'LiveCue 상태 동기화 지연',
+                            message:
+                                '상태 문서를 읽지 못하고 있습니다. 권한/네트워크를 확인한 뒤 다시 시도해 주세요.',
+                            actionLabel: '다시 시도',
+                            onAction: () => setState(() {}),
+                          );
+                        }
                         return const AppLoadingState(
                           message: 'LiveCue 상태 동기화 중...',
                         );
                       }
+                      _clearCueWaitingWatchdog();
                       if (cueSnapshot.hasError) {
                         return AppStateCard(
                           icon: Icons.sync_problem_outlined,
@@ -1123,6 +1160,7 @@ class LiveCueFullScreenPage extends ConsumerStatefulWidget {
 
 class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     with WidgetsBindingObserver {
+  static const Duration _cueSyncTimeout = Duration(seconds: 15);
   final FocusNode _focusNode = FocusNode();
   late final LiveCueStrokeEngine _strokeEngine;
   late final _LiveCueRenderPresenter _renderPresenter;
@@ -1152,6 +1190,8 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   String _sharedNoteContent = '';
   int? _activeDrawingPointer;
   bool _showDrawingToolPanel = false;
+  Timer? _cueWaitingTimer;
+  DateTime? _cueWaitingSince;
   final ValueNotifier<int> _viewerRevision = ValueNotifier<int>(0);
   final ValueNotifier<int> _overlayRevision = ValueNotifier<int>(0);
   int? _previousImageCacheMaxEntries;
@@ -1271,6 +1311,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     unawaited(_syncCoordinator.dispose());
     _viewerAuthSubscription?.cancel();
     _viewerIdTokenRefreshTimer?.cancel();
+    _cueWaitingTimer?.cancel();
     _restoreImageCacheBudget();
     _viewerRevision.dispose();
     _overlayRevision.dispose();
@@ -1301,6 +1342,26 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     _viewerIdTokenRefreshTimer = null;
     _viewerTokenUserId = null;
     _viewerIdToken = null;
+  }
+
+  void _beginCueWaitingWatchdog() {
+    _cueWaitingSince ??= DateTime.now();
+    _cueWaitingTimer ??= Timer(_cueSyncTimeout, () {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  void _clearCueWaitingWatchdog() {
+    _cueWaitingTimer?.cancel();
+    _cueWaitingTimer = null;
+    _cueWaitingSince = null;
+  }
+
+  bool get _isCueWaitingTimedOut {
+    final startedAt = _cueWaitingSince;
+    if (startedAt == null) return false;
+    return DateTime.now().difference(startedAt) >= _cueSyncTimeout;
   }
 
   void _syncViewerTokenOwner(User? user) {
@@ -2077,10 +2138,28 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                     builder: (context, cueSnapshot) {
                       if (cueSnapshot.connectionState ==
                           ConnectionState.waiting) {
+                        _beginCueWaitingWatchdog();
+                        if (_isCueWaitingTimedOut) {
+                          return Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 520),
+                              child: AppStateCard(
+                                icon: Icons.sync_problem_outlined,
+                                isError: true,
+                                title: 'LiveCue 상태 동기화 지연',
+                                message:
+                                    '상태 문서를 읽지 못하고 있습니다. 권한/네트워크를 확인한 뒤 다시 시도해 주세요.',
+                                actionLabel: '다시 시도',
+                                onAction: () => setState(() {}),
+                              ),
+                            ),
+                          );
+                        }
                         return const Center(
                           child: CircularProgressIndicator(color: Colors.white),
                         );
                       }
+                      _clearCueWaitingWatchdog();
                       if (cueSnapshot.hasError) {
                         return Center(
                           child: Text(
