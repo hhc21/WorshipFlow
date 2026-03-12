@@ -188,29 +188,9 @@ Future<SongCandidate?> _matchSongAutomatically(
   FirebaseFirestore firestore,
   String title,
 ) async {
-  final exactTitle = title.trim();
-  if (exactTitle.isNotEmpty) {
-    try {
-      final exactQuery = await firestore
-          .collection('songs')
-          .where('title', isEqualTo: exactTitle)
-          .limit(1)
-          .get();
-      if (exactQuery.docs.isNotEmpty) {
-        final doc = exactQuery.docs.first;
-        return SongCandidate(
-          id: doc.id,
-          title: (doc.data()['title'] ?? '').toString(),
-        );
-      }
-    } catch (_) {
-      // Continue to normalized search fallback.
-    }
-  }
-  final normalizedTitle = normalizeQuery(title);
-  if (normalizedTitle.isEmpty) return null;
-  final candidates = await findSongCandidates(firestore, normalizedTitle);
+  final candidates = await findSongCandidates(firestore, title);
   if (candidates.isEmpty) return null;
+  final normalizedTitle = normalizeQuery(title);
   for (final candidate in candidates) {
     if (normalizeQuery(candidate.title) == normalizedTitle) return candidate;
   }
@@ -262,22 +242,7 @@ Future<List<String>> _songIdCandidatesForPreview(
   final titleCandidates = _candidateTitlesFromFallback(fallbackTitle);
   for (final title in titleCandidates) {
     try {
-      final exactQuery = await firestore
-          .collection('songs')
-          .where('title', isEqualTo: title)
-          .limit(10)
-          .get();
-      for (final doc in exactQuery.docs) {
-        addId(doc.id);
-      }
-    } catch (_) {
-      // Continue with token-based matching.
-    }
-
-    final normalizedTitle = normalizeQuery(title);
-    if (normalizedTitle.isEmpty) continue;
-    try {
-      final candidates = await findSongCandidates(firestore, normalizedTitle);
+      final candidates = await findSongCandidates(firestore, title);
       for (final candidate in candidates) {
         addId(candidate.id);
       }
@@ -288,34 +253,16 @@ Future<List<String>> _songIdCandidatesForPreview(
     final safeTeamId = teamId?.trim() ?? '';
     if (safeTeamId.isNotEmpty) {
       try {
-        final byTitle = await firestore
-            .collection('teams')
-            .doc(safeTeamId)
-            .collection('songRefs')
-            .where('title', isEqualTo: title)
-            .limit(10)
-            .get();
-        for (final doc in byTitle.docs) {
-          addId(doc.data()['songId']?.toString().trim() ?? doc.id);
+        final refCandidates = await findTeamSongRefCandidates(
+          firestore,
+          teamId: safeTeamId,
+          title: title,
+        );
+        for (final songId in refCandidates) {
+          addId(songId);
         }
       } catch (_) {
         // Continue with available candidates.
-      }
-      if (normalizedTitle.isNotEmpty) {
-        try {
-          final bySearchToken = await firestore
-              .collection('teams')
-              .doc(safeTeamId)
-              .collection('songRefs')
-              .where('searchTokens', arrayContains: normalizedTitle)
-              .limit(10)
-              .get();
-          for (final doc in bySearchToken.docs) {
-            addId(doc.data()['songId']?.toString().trim() ?? doc.id);
-          }
-        } catch (_) {
-          // Continue with available candidates.
-        }
       }
     }
   }

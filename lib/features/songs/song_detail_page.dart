@@ -30,6 +30,14 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
   bool _uploading = false;
   bool _noteLoaded = false;
   bool _showAll = false;
+  Future<DocumentSnapshot<Map<String, dynamic>>>? _memberFuture;
+  String? _memberFutureUserId;
+  Future<DocumentSnapshot<Map<String, dynamic>>>? _songFuture;
+  String? _songFutureSongId;
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>>? _assetsFuture;
+  String? _assetsFutureSongId;
+  Future<String>? _noteFuture;
+  String? _noteFutureUserId;
 
   Future<bool> _ensureGlobalAdmin(BuildContext context) async {
     try {
@@ -51,6 +59,24 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
   void dispose() {
     _noteController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant SongDetailPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.songId != widget.songId ||
+        oldWidget.teamId != widget.teamId) {
+      _songFuture = null;
+      _songFutureSongId = null;
+      _assetsFuture = null;
+      _assetsFutureSongId = null;
+      _memberFuture = null;
+      _memberFutureUserId = null;
+      _noteFuture = null;
+      _noteFutureUserId = null;
+      _noteLoaded = false;
+      _showAll = false;
+    }
   }
 
   Future<DocumentSnapshot<Map<String, dynamic>>> _loadSong(
@@ -81,6 +107,50 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
         .orderBy('createdAt', descending: true)
         .get();
     return snapshot.docs;
+  }
+
+  Future<DocumentSnapshot<Map<String, dynamic>>> _memberFutureFor(
+    FirebaseFirestore firestore,
+    String userId,
+  ) {
+    if (_memberFuture == null || _memberFutureUserId != userId) {
+      _memberFutureUserId = userId;
+      _memberFuture = _loadMember(firestore, userId);
+    }
+    return _memberFuture!;
+  }
+
+  Future<DocumentSnapshot<Map<String, dynamic>>> _songFutureFor(
+    FirebaseFirestore firestore,
+  ) {
+    if (_songFuture == null || _songFutureSongId != widget.songId) {
+      _songFutureSongId = widget.songId;
+      _songFuture = _loadSong(firestore);
+    }
+    return _songFuture!;
+  }
+
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _assetsFutureFor(
+    FirebaseFirestore firestore,
+  ) {
+    if (_assetsFuture == null || _assetsFutureSongId != widget.songId) {
+      _assetsFutureSongId = widget.songId;
+      _assetsFuture = _loadAssets(firestore);
+    }
+    return _assetsFuture!;
+  }
+
+  Future<String> _noteFutureFor(FirebaseFirestore firestore, String userId) {
+    if (_noteFuture == null || _noteFutureUserId != userId) {
+      _noteFutureUserId = userId;
+      _noteFuture = _loadNote(firestore, userId);
+    }
+    return _noteFuture!;
+  }
+
+  void _invalidateAssetsFuture() {
+    _assetsFuture = null;
+    _assetsFutureSongId = null;
   }
 
   Future<void> _openAssetData(
@@ -341,6 +411,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
           content: Text(nextName.isEmpty ? '표시명을 초기화했습니다.' : '표시명을 저장했습니다.'),
         ),
       );
+      _invalidateAssetsFuture();
       setState(() {});
     } catch (error) {
       if (!context.mounted) return;
@@ -400,6 +471,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('악보 항목을 삭제했습니다.')));
+      _invalidateAssetsFuture();
       setState(() {});
     } catch (error) {
       if (!context.mounted) return;
@@ -474,6 +546,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('악보 업로드 완료')));
+      _invalidateAssetsFuture();
       setState(() {});
     } catch (error) {
       if (!context.mounted) return;
@@ -553,7 +626,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
     }
 
     return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      future: _loadMember(firestore, user.uid),
+      future: _memberFutureFor(firestore, user.uid),
       builder: (context, memberSnapshot) {
         if (memberSnapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
@@ -576,7 +649,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                future: _loadSong(firestore),
+                future: _songFutureFor(firestore),
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Center(child: CircularProgressIndicator());
@@ -637,7 +710,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
                             FutureBuilder<
                               List<QueryDocumentSnapshot<Map<String, dynamic>>>
                             >(
-                              future: _loadAssets(firestore),
+                              future: _assetsFutureFor(firestore),
                               builder: (context, assetSnapshot) {
                                 if (assetSnapshot.connectionState ==
                                     ConnectionState.waiting) {
@@ -842,7 +915,7 @@ class _SongDetailPageState extends ConsumerState<SongDetailPage> {
                       ),
                       const SizedBox(height: 8),
                       FutureBuilder<String>(
-                        future: _loadNote(firestore, user.uid),
+                        future: _noteFutureFor(firestore, user.uid),
                         builder: (context, noteSnapshot) {
                           if (noteSnapshot.connectionState ==
                                   ConnectionState.waiting &&

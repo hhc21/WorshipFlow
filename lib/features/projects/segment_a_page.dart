@@ -122,10 +122,9 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     FirebaseFirestore firestore,
     String title,
   ) async {
-    final normalizedTitle = normalizeQuery(title);
-    if (normalizedTitle.isEmpty) return null;
-    final candidates = await findSongCandidates(firestore, normalizedTitle);
+    final candidates = await findSongCandidates(firestore, title);
     if (candidates.isEmpty) return null;
+    final normalizedTitle = normalizeQuery(title);
     for (final candidate in candidates) {
       if (normalizeQuery(candidate.title) == normalizedTitle) return candidate;
     }
@@ -536,10 +535,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     }
 
     try {
-      final candidates = await findSongCandidates(
-        firestore,
-        normalizeQuery(parsed.title),
-      );
+      final candidates = await findSongCandidates(firestore, parsed.title);
 
       if (!context.mounted) return;
 
@@ -636,7 +632,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     }
 
     final normalizedTitle = normalizeQuery(parsed.title);
-    final candidates = await findSongCandidates(firestore, normalizedTitle);
+    final candidates = await findSongCandidates(firestore, parsed.title);
     SongCandidate? matched;
     if (candidates.length == 1) {
       matched = candidates.first;
@@ -875,19 +871,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
       }
       if (matched == null) {
         for (final candidateTitle in titleCandidates) {
-          final refSnapshot = await firestore
-              .collection('teams')
-              .doc(widget.teamId)
-              .collection('songRefs')
-              .where('title', isEqualTo: candidateTitle)
-              .limit(1)
-              .get();
-          if (refSnapshot.docs.isEmpty) continue;
-          final refSongId = refSnapshot.docs.first
-              .data()['songId']
-              ?.toString()
-              .trim();
-          if (refSongId == null || refSongId.isEmpty) continue;
+          final refSongIds = await findTeamSongRefCandidates(
+            firestore,
+            teamId: widget.teamId,
+            title: candidateTitle,
+          );
+          if (refSongIds.isEmpty) continue;
+          final refSongId = refSongIds.first;
           final songSnapshot = await firestore
               .collection('songs')
               .doc(refSongId)
