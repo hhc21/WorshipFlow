@@ -11,15 +11,13 @@ wf-v1.0.0
 
 ---
 
-# Issue 1 — LiveCue stuck on sync
+# Issue 1 — LiveCue first-entry render latency
 
 ## Symptom
 
 Entering LiveCue shows:
 
-LiveCue 상태 동기화 중...
-
-The screen remains stuck and never resolves.
+LiveCue 상태 동기화 지연
 
 ## Steps to reproduce
 
@@ -30,70 +28,46 @@ The screen remains stuck and never resolves.
 
 ## Expected
 
-LiveCue should show current cue state and setlist.
+LiveCue should render score state without long startup delay.
 
 ## Actual
 
-UI remains stuck on "LiveCue 상태 동기화 중..."
+LiveCue eventually loads, but first score render can take about 15 seconds.
 
 ## Suspected causes
 
-Possible Firestore read issues:
-
-teams/{teamId}/projects/{projectId}/liveCue/state
-
-Possible problems:
-
-- missing document
-- listener attach timing
-- snapshot fallback not handled
-- loading state never exits
+Possible first-entry timing instability around:
+- auth readiness
+- first snapshot attach timing
+- watchdog start timing
+- re-entry mode transition timing
 
 ---
 
-# Issue 2 — Sheet exists in library but not visible in project
+# Issue 2 — Setlist reorder numbering stale after reorder
 
 ## Symptom
 
-Song appears in Library:
-
-주의 집에 거하는 자
-
-But when the song is added to project setlist:
-
-Sheet is not displayed.
+Setlist reorder works, but visible leading numbers do not refresh correctly after move up/down.
 
 ## Steps
 
-1. register song
-2. upload sheet
-3. confirm sheet exists in Library
-4. add song to project
-5. sheet does not render
+1. open project setlist
+2. reorder items
+3. verify item ordering changed
+4. check visible numbering labels
 
 ## Expected
 
-Project setlist should display linked sheet.
+Displayed numbering should immediately match current order.
 
 ## Actual
 
-Library shows sheet file  
-Project does not resolve sheet.
+Order is updated, but rendered numbering remains stale for one or more items.
 
 ## Suspected causes
 
-Possible reference mismatch:
-
-library collection
-vs
-project setlist reference
-
-Possible issues:
-
-- incorrect songId reference
-- storage path mismatch
-- file metadata not propagated
-- project setlist schema mismatch
+Display label appears to be cached/persisted and not fully recomputed from current order on every render.
 
 ---
 
@@ -109,7 +83,10 @@ Core flows working:
 - library
 - song registration
 
-But runtime issues detected in:
+Latest manual verification PASS:
+- problem song resolution (`주의 집에 거하는 자`)
+- in-app preview flow
 
-- LiveCue state sync
-- sheet resolution in project
+Residual runtime issues:
+- LiveCue first-entry render latency (~15s)
+- setlist reorder numbering stale after reorder

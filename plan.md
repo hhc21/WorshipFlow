@@ -134,7 +134,7 @@
 | SP-05-6 | 통합 완료 | cue 이동은 SP-05-3 범위에 통합 반영 |
 | SP-05-7 | 통합 완료 | 운영자 UI 기본 기능은 SP-05-4에 통합 반영 |
 | SP-06 | 완료 | Runtime Guard + Observability |
-| SP-07 | 진행중 | Release Gate 증빙 마감/판정 기록 대기 |
+| SP-07 | 진행중 | Release Gate 증빙/최종 안정화 진행중 (잔여 runtime 이슈 존재) |
 | SP-08 | 예정 | Score System & Library Expansion |
 | SP-09 | 예정 | Music Metadata Layer |
 | SP-10 | 예정 | Performance Assistance Layer |
@@ -537,20 +537,32 @@
 - [x] static gate PASS
 - [x] 기능/런타임 게이트 기준 정렬
 - [x] device validation PASS 문서 반영
+- [x] 최신 검증 결과를 `docs/release_evidence.md`에 반영
 - [ ] release evidence 패키지 필드 100% 연결
+- [ ] 잔여 runtime 이슈 안정화 (LiveCue first-entry latency, reorder numbering refresh)
 - [ ] 최종 승인 판정(Approved/Blocked) 기록
 
 ## 10.5 현재 판정
 - 상태: Release Candidate (운영 모니터링/증빙 정렬 단계)
 - 주의: 증빙 완결 전 `최종 승인 완료`로 표기하지 않음
+- 최신 검증 반영 상태:
+  - `flutter analyze`: PASS
+  - `flutter test --reporter=compact`: PASS
+  - LiveCue first entry: 기능 PASS, 초기 렌더 지연(~15s) 잔존
+  - 문제 곡(`주의 집에 거하는 자`) 해상도: PASS
+  - in-app preview: PASS
+  - setlist reorder: 기능 동작하나 번호 갱신 불일치 잔존
 - 판정 분리:
   - 배포 실행 상태: 환경/시점별로 존재할 수 있으나 본 문서는 승인 상태와 분리해 관리
   - Release Gate 승인 상태: `Pending Evidence` (증빙 패키지 완결 전)
 - 해석 원칙: post-deploy 이슈 관측 기록이 존재하더라도, 이는 `운영 데이터 존재`를 뜻하며 `최종 승인 완료`를 의미하지 않는다.
+- 결론: SP-07은 증빙 정렬 + 최종 안정화 단계이며 아직 closed 상태가 아니다.
 
 ## 10.6 SP-07 잔여 리스크
 - 문서 PASS와 운영 로그 증빙 간 링크 누락 가능성
 - post-deploy runtime issue 재발 여부에 따른 승인 판정 변경 가능성
+- LiveCue first-entry 초기 렌더 지연(~15s)으로 사용자 체감 품질 저하 가능성
+- setlist reorder 이후 표시 번호가 즉시 갱신되지 않는 UI 정합성 리스크
 - LiveCue 초기 attach/re-entry 타이밍 불안정 가능성
   - auth-ready 시점, first snapshot 수신 시점, watchdog 시작 시점, fullscreen/operator 전환 타이밍에 따라 first-entry 지연/재시도 필요 상황이 재현될 수 있음
 - legacy setlist 항목의 canonical field 오염 가능성
