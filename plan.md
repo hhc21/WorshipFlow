@@ -1,1178 +1,1446 @@
-# WorshipFlow Implementation Plan (2026-03-10 Final)
+# WorshipFlow Implementation Plan (Detailed Baseline)
 
-작성일: 2026-03-10  
+작성일: 2026-03-12 (KST)
+역할: 실행 기준선(Execution Baseline), 단계 상태판(Status Board), 검증 게이트(Release Gate), 후속 Workstream 정의 문서
+
 근거 문서:
-- `research.md` (2026-03-10 Baseline)
-- `product_roadmap.md` (2026-03-10 Baseline)
-- `system_architecture.md` (2026-03-10)
-- `data_model.md` (2026-03-10)
-- `firestore_rules.md` (2026-03-10)
-- `livecue_protocol.md` (2026-03-10)
-
-이 문서는 WorshipFlow의 **구현 계획 / 실행 기준 문서**다.  
-코드 분석은 `research.md`, 제품 전략은 `product_roadmap.md`, 시스템 구조는 `system_architecture.md`가 담당한다.
-
-즉:
-- `research.md` → 현재 코드 상태
-- `product_roadmap.md` → 제품 방향 / 우선순위
-- `system_architecture.md` → 현재 시스템 구조
-- `plan.md` → 구현 순서 / 게이트 / 검증 기준
+- `research.md`
+- `product_roadmap.md`
+- `system_architecture.md`
+- `data_model.md`
+- `firestore_rules.md`
+- `livecue_protocol.md`
+- `docs/release_runbook.md`
+- `docs/ops/release_checklist.md`
+- `docs/ops/device_validation.md`
+- `docs/ops/post_deploy_runtime_issues.md`
 
 ---
 
-# 0. 절대 정책
+# 0. 문서 운용 원칙
 
-## 0.1 운영 정책
+## 0.1 이 문서를 상세하게 유지하는 이유
+이 문서는 단순 TODO가 아니라 다음 목적의 운영 기준선이다.
 
+1. 컨텍스트 압축/세션 전환 시 복구 가능한 단일 기준 제공
+2. 구현 의사결정과 검증 근거를 추적 가능한 형태로 보관
+3. 코드 상태와 문서 상태를 분리하지 않고 동기화
+4. SP별 완료/미완료/리스크/다음 단계를 한 문서에서 확인
+
+## 0.2 소스 오브 트루스 규칙
+- 코드가 문서보다 우선한다.
+- 문서와 코드가 충돌하면 문서를 코드 기준으로 수정한다.
+- 검증 결과(`analyze/test/rules`)가 문구보다 우선한다.
+
+## 0.3 운영 정책
 - GitHub는 백업/복구 용도로만 사용한다.
-- 본 문서는 구현 계획 문서이며, 구현은 별도 승인 후 진행한다.
-- 문서, 코드, 검증 결과가 서로 충돌할 경우 **현재 코드 + 검증 결과**를 우선 기준으로 삼는다.
+- 승인 없는 전면 재작성(Big Rewrite)은 금지한다.
+- 대형 파일은 기능 단위로만 수정한다.
+- 런타임 안전성이 기능 확장보다 우선한다.
 
-## 0.2 현재 개발 운영 모드
+## 0.4 현재 개발 모드
+- 제품 핵심 구조는 Flutter(iOS/Android) 앱이다.
+- 현재 실행 사이클은 웹 기준으로 빠르게 검증하되 앱 코어 원칙을 훼손하지 않는다.
+- Next.js Viewer는 핵심 엔진이 아니라 fallback/보조 경로다.
 
-현재 사이클은 **웹 기준 개발**을 지속한다.
-
-이 의미는 다음과 같다.
-
-- 기능 개발 / 구조 개선 / 운영 기능 구현은 웹 기준으로 먼저 진행한다.
-- 실기 시나리오 결과는 `docs/ops/device_validation.md`를 기준으로 관리한다.
-- 현재 단계는 실기 재수행보다 Release Gate 증빙 패키지 정렬을 우선한다.
-- 모바일 실기 검증은 배포 승인 이후 회귀 루프에서 재검증할 수 있다.
-
-## 0.3 구현 안전 정책
-
-### 작업 단위 제한
-
-한 번의 작업 사이클에서 아래 5개 영역 중 **하나만 수정**할 수 있다.
-
+## 0.5 작업 단위 제한 정책
+한 번의 작업 사이클에서는 아래 중 1개 축을 우선 대상으로 제한한다.
 - 동기화 로직
 - 렌더링 로직
 - 입력 처리 로직
 - 브릿지 로직
 - Firebase 데이터 접근 로직
 
-위 5개 영역을 동시에 수정하는 작업은 금지한다.
+복합 이슈라도 가능한 한 사이클을 분리해 회귀 범위를 줄인다.
 
-### 대형 파일 수정 제한
+## 0.6 대형 파일 거버넌스
+고위험 파일:
+- `lib/features/projects/live_cue_page.dart`
+- `lib/features/teams/team_home_page.dart`
+- `lib/features/admin/global_admin_page.dart`
 
-다음 파일은 대형 파일로 간주한다.
+규칙:
+1. 전면 재작성 금지
+2. 기능 단위 수정
+3. 변경 범위 사전 명시
+4. 변경 후 검증 3종 필수
+5. 무관한 리팩토링 동시 수행 금지
 
-- `live_cue_page.dart`
-- `team_select_page.dart`
-- `team_home_page.dart`
-- `global_admin_page.dart`
-
-적용 규칙:
-
-1. 한 작업에서 최대 300줄 범위를 원칙으로 한다.
-2. 함수 단위 / 책임 단위로 분리 작업 수행한다.
-3. 기능 이동은 인터페이스와 역할 정의 이후 진행한다.
-4. 대형 파일을 한 번에 전면 재작성하지 않는다.
-
-### 리팩토링 금지 원칙
-
-다음 작업은 승인 없이 수행하지 않는다.
-
-- 상태관리 라이브러리 교체
-- Flutter 아키텍처 패턴 전면 변경
-- Next.js Viewer 구조 전면 재설계
-- Firebase 데이터 모델 대규모 변경
-- LiveCue 전체 파일 재작성
-
-## 0.4 상태 소유권 정책
-
-각 상태는 단일 소유자를 가진다.
-
-- Sync state → `LiveCueSyncCoordinator`
-- Render state → `RenderPresenter`
-- Input state → `LiveCueStrokeEngine`
-- Persistence state → `LiveCueNotePersistenceAdapter`
+## 0.7 상태 소유권 정책
+- Sync state: `LiveCueSyncCoordinator`
+- Render state: `_LiveCueRenderPresenter`
+- Input state: `LiveCueStrokeEngine`
+- Persistence state: `LiveCueNotePersistenceAdapter`
 
 원칙:
-
-- UI는 상태를 직접 계산/복구/정합화하지 않는다.
+- UI는 상태 소유자가 아니다.
 - UI는 이벤트를 전달하고 결과를 소비한다.
-- 동일 상태를 여러 계층이 동시에 수정하는 구조는 금지한다.
+- 상태 복구/정합화는 소유 계층에서만 수행한다.
 
-## 0.5 Async Safety 정책
+## 0.8 Async Safety 정책
+- `build()`에서 async 시작 금지
+- listener 중복 attach 금지
+- dispose 이후 도착 결과 방어
+- stale emission은 generation/sequence 기준 drop
+- fallback 전환이 input state를 끊지 않도록 분리
 
-원칙:
-
-- `build()` 내부에서 async 작업을 직접 시작하지 않는다.
-- Future / Stream ordering은 lifecycle과 분리해서 안전하게 관리한다.
-- dispose 이후 도착 가능한 async 결과를 항상 고려한다.
-- state update 전 lifecycle / mounted 상태를 확인한다.
-- Stream listener 중복 생성 / 중복 attach는 금지한다.
-- preload / render fallback / input state가 서로 입력을 끊지 않도록 분리한다.
-
-## 0.6 Observability 정책
-
-LiveCue 및 핵심 동기화 구조는 runtime trace가 가능해야 한다.
-
+## 0.9 Observability 정책
 관찰 대상:
-
 - render pipeline state
 - sync revision 변화
 - input state transition
 - render fallback trigger
 - stream emission ordering
-- preload suppression 여부
-- cache pressure / eviction
+- preload suppression
+- cache pressure/eviction
 
 원칙:
-
-- critical state transition은 로그를 남긴다.
-- race condition 의심 구간은 debug instrumentation 대상으로 기록한다.
-- 임시 로그와 상시 로그를 구분한다.
-
----
-
-# 1. 현재 기준선 요약
-
-## 1.1 현재 완료 / 부분완료 상태
-
-### 완료
-
-- WP-08 보안 게이트(키 노출 점검 자동화, 키 정책 문서화)
-- WP-03 데이터 표준
-  - 상대 좌표 `0.0 ~ 1.0`
-  - fixed-8
-  - `relative-v1`
-- SP-01 App Foundation 복구
-- SP-01A Bridge Security Hardening
-- SP-02 LiveCue Sync Core 신뢰화
-- SP-03 구조 분리
-  - SyncCoordinator
-  - RenderPresenter
-  - StrokeEngine
-  - NotePersistenceAdapter
-- SP-05-1 운영자 → 팀 진입
-
-### 부분완료
-
-- SP-07 Release Gate 실행 증빙
-  - 정적 게이트(`analyze`/`test`/`rules`) 통과 상태 확인 완료
-  - `docs/ops/device_validation.md` 기준 실기 시나리오 PASS 문서화 완료
-  - Release Gate 최종 승인용 증빙 패키지(타임스탬프/빌드 버전/로그 참조/미디어 링크) 정리 대기
-
-### 보류
-
-- 없음 (핵심 실기 시나리오는 문서상 PASS 상태로 반영됨)
-
-## 1.2 현재 개발 방향
-
-현재 개발 순서는 다음과 같다.
-
-1. SP-07 증빙 패키지 정리
-   - release checklist 항목별 실행 시각(KST)
-   - build/release version
-   - 로그 참조 경로
-   - 스크린샷/영상 링크
-2. SP-07 최종 PASS/FAIL 판정
-3. 배포 승인(또는 FAIL 항목 보완 후 재판정)
-4. 배포 후 first-error / regression 운영 루프
-5. SP-08+ 협업 기능 백로그 착수
-
----
-
-# 2. 현재 구조 기준 구현 상태
-
-## 2.1 Canonical 데이터 축
-
-현재 canonical 데이터 구조는 `teams/{teamId}` 중심이다.
-
-핵심 경로:
-
-- `users/{uid}`
-- `users/{uid}/ClientProbe/mobile`
-- `users/{uid}/teamMemberships/{teamId}` (미러/보조)
-- `teams/{teamId}`
-- `teams/{teamId}/members/{memberId}`
-- `teams/{teamId}/projects/{projectId}`
-- `teams/{teamId}/projects/{projectId}/segmentA_setlist/{itemId}`
-- `teams/{teamId}/projects/{projectId}/segmentB_application/{itemId}`
-- `teams/{teamId}/projects/{projectId}/liveCue/state`
-- `teams/{teamId}/projects/{projectId}/sharedNotes/main`
-- `teams/{teamId}/userProjectNotes/{noteId}`
-- `songs/{songId}`
-- `globalAdmins/{uid}`
-
-장기 확장용 구조인 `churches/{churchId}`는 현재 canonical이 아니다.
-
-## 2.2 현재 라우팅 기준선
-
-주요 경로:
-
-- `/sign-in`
-- `/teams`
-- `/teams/:teamId`
-- `/teams/:teamId/projects/:projectId`
-- `/teams/:teamId/projects/:projectId/live`
-- `/teams/:teamId/songs/:songId`
-- `/admin`
-
-운영자 경로:
-
-- `/admin`
-- 팀 목록
-- `/teams/{teamId}` 진입 가능
-
-## 2.3 현재 LiveCue 구조
-
-### Sync Layer
-
-- `LiveCueSyncCoordinator`
-- `LiveCueResolvedState`
-
-책임:
-- cue/setlist attach/detach
-- 웹 polling 전환 순차 보장
-- native snapshot stream
-- generation / sequence trace
-- `currentCueLabel -> songId -> title+key` fallback
-
-### Render Layer
-
-- `_LiveCueRenderPresenter`
-
-책임:
-- preview cache / warm preview
-- preload / prefetch
-- renderer fallback
-- overlay visibility
-- viewport / transform 제어
-
-### Input Layer
-
-- `LiveCueStrokeEngine`
-
-책임:
-- beginStroke / appendStroke / endStroke
-- erase / undo / clear
-- brush/tool state
-- layer visibility
-- drawing mode state
-
-### Persistence Layer
-
-- `LiveCueNotePersistenceAdapter`
-
-책임:
-- private/shared note load/save
-- legacy fallback
-- migration write-back
-- layer persistence 분기
-
----
-
-# 3. Roadmap (완료 / 진행 / 예정)
-
-## 3.1 SP-01 App Foundation
-
-상태: 완료
-
-목표:
-- iOS/Android 실행 가능 상태 확보
-- Firebase 연결
-- 모바일 로그인 probe 기준선 확보
-
-완료 항목:
-
-- iOS 플랫폼 생성 확인
-- Android 플랫폼 생성 확인
-- Firebase 모바일 설정 연결 확인
-- 최소 1회 Flutter 앱 빌드 성공
-- 최소 1회 iOS Simulator 실행 성공
-- 최소 1회 Android Emulator 실행 성공
-- 모바일 환경 로그인 흐름 확인
-- 앱 내 Firebase probe write/read 성공
-
-메모:
-- SP-01 기준선 자체는 당시 모바일 probe 성공으로 충족되었다.
-- iOS 로그인 시나리오는 `docs/ops/device_validation.md`에 PASS로 기록되어 있다.
-
-## 3.2 SP-01A Bridge Security Hardening
-
-상태: 완료
-
-완료 항목:
-
-- `targetOrigin='*'` 제거
-- origin whitelist 정책 적용
-- Host → Viewer 토큰 전달 경계 재검증
-
-## 3.3 SP-02 LiveCue Sync Core 신뢰화
-
-상태: 완료
-
-완료 기준:
-
-- 운영자 탭에서 선택한 악보가 LiveCue에서 동일하게 로드됨
-- stream ordering 로그에 역전/충돌 없음
-- score load failure 재현 제거
-
-반영 항목:
-
-- cueLabel 우선순위 해석 강화
-- `songId -> title+key` fallback 보강
-- 운영화면 / fullscreen 공통 해석 정리
-- native stream 단일화
-- 웹 polling 전환 순차 보장
-- stale/missing songId 회귀 테스트 추가
-
-남은 항목:
-
-- SP-02 자체 미완 항목은 없다.
-- 실기 회귀 재측정은 SP-07 승인 후 운영 루프에서 수행한다.
-
-## 3.4 SP-03 LiveCue 책임 충돌 해소
-
-상태: 구현 완료
-
-완료 항목:
-
-### 1단계
-- 책임 경계 정의
-- 인터페이스 설계
-
-### 2단계
-- SyncCoordinator 분리
-
-### 3단계
-- RenderPresenter 분리
-
-### 4단계
-- StrokeEngine 분리
-
-### 5단계
-- NotePersistenceAdapter 분리
-
-보강 결과:
-
-- Sync / Render / Input / Persistence 경계 분리
-- UI 직접 계산/저장 책임 축소
-- adapter / engine / coordinator 중심 구조로 정렬
-- 전용 테스트 추가
-  - stroke engine test
-  - note persistence adapter test
-
-남은 리스크:
-
-- 대형 파일 유지보수 비용
-- 일부 관찰 로그(`RenderBox was not laid out`, `AppCheckProvider not installed`) 영향도 추적 필요
-
----
-
-# 4. SP-04 실기기 안정화
-
-상태: **구현 완료 / 실기 시나리오 문서 PASS / 릴리스 승인 증빙 패키지 보강 대기**
-
-목표:
-- 실제 기기 환경에서 LiveCue가 안정적으로 동작하도록 정리
-
-## 4.1 완료된 코드 하드닝
-
-반영 범위:
-
-- pointer device 안정화
-- orientation 변경 대응
-- preload 충돌 방지
-- ImageCache 메모리 제한
-- preview cache eviction
-- 긴 세션 메모리 안정화 장치
-- 드로잉 중 rebuild 감소
-- 필기 입력 안정성 보강
-
-세부 반영:
-
-- 지원 입력 종류 필터링
-- active pointer 추적
-- `WidgetsBindingObserver` 기반 metrics 변화 처리
-- rotation / resize 시 active pointer 정리
-- viewer transform reset
-- drawing 중 warm prefetch 억제
-- ImageCache 상한 적용 / 복원
-- preview cache LRU eviction
-- song key future cache 상한
-- 입력 / preload / render 경쟁 최소화
-
-## 4.2 검증 상태
-
-통과:
-
+- critical transition은 로그/metric을 남긴다.
+- 임시 디버그 로그와 상시 운영 로그를 분리한다.
+- 운영 로그는 first-error 분석에 재사용 가능해야 한다.
+
+## 0.10 필수 검증 명령
+코드/규칙 변경 후 반드시 실행:
 - `flutter analyze`
 - `flutter test --reporter=compact`
 - `bash scripts/ci/test_rules.sh`
 
-## 4.3 완료 조건
+---
 
-구현 기준:
-- [x] 필기 끊김 방지 코드 반영
-- [x] 회전 대응 코드 반영
-- [x] 메모리 안정화 코드 반영
-- [x] 정적 검증 통과
+# 1. 현재 단계 상태판 (2026-03-12)
 
-실기기 기준:
-- [x] Apple Pencil 장시간 필기 안정성 (문서 PASS)
-- [x] iPhone 회전 안정성 (문서 PASS)
-- [x] 공유 노트 저장-재진입 지속성 (문서 PASS)
-- [x] Viewer host payload 검증 시나리오 (문서 PASS)
-- [x] iOS Google 로그인 시나리오 (문서 PASS)
+## 1.1 개발 단계
+현재 단계:
+**Post-Deploy Runtime Stabilization + Release Evidence Alignment**
 
-근거 문서:
-- `docs/ops/device_validation.md`
+의미:
+- 배포 이후 발견된 런타임 이슈를 최소 안전 패치로 정리
+- SP-07 증빙 패키지(시각/빌드/로그/미디어 링크) 완결
+- 기능 확장보다 운영 신뢰성과 회귀 방지 우선
 
-## 4.4 남은 증빙 패키징 체크 (SP-07 실행)
+## 1.2 SP 상태 매트릭스
+| SP | 상태 | 현재 판정 |
+|---|---|---|
+| SP-01 | 완료 | App Foundation 기준선 충족 |
+| SP-01A | 완료 | Bridge Security Hardening 반영 |
+| SP-02 | 완료 | LiveCue Sync Core 신뢰화 완료 |
+| SP-03 | 완료 | Sync/Render/Input/Persistence 분리 완료 |
+| SP-04 | 완료(구현+문서PASS) | 실기 문서 PASS, 증빙 패키지 연결 보강 단계 |
+| SP-05-1 | 완료 | 운영자 -> 팀 진입 |
+| SP-05-2 | 완료 | setlist CRUD |
+| SP-05-3 | 완료 | reorder + cue 이동 |
+| SP-05-4 | 완료 | 운영자 UI 안정화 |
+| SP-05-5 | 통합 완료 | 다음곡/이전곡 UX는 SP-05-4 운영 동선에 통합 관리 |
+| SP-05-6 | 통합 완료 | cue 이동은 SP-05-3 범위에 통합 반영 |
+| SP-05-7 | 통합 완료 | 운영자 UI 기본 기능은 SP-05-4에 통합 반영 |
+| SP-06 | 완료 | Runtime Guard + Observability |
+| SP-07 | 진행중 | Release Gate 증빙 마감/판정 기록 대기 |
+| SP-08 | 예정 | Score System & Library Expansion |
+| SP-09 | 예정 | Music Metadata Layer |
+| SP-10 | 예정 | Performance Assistance Layer |
+| SP-11 | 예정 | Collaboration Layer |
+| SP-12 | 예정 | Production Ops Maturity |
+| SP-13 | 예정 | Score System Expansion |
+| SP-14 | 예정 | Community Song Contribution Pipeline |
 
-- [ ] 각 시나리오별 실행 시각(KST) 링크를 release checklist에 반영
-- [ ] build version / release version을 시나리오별로 기재
-- [ ] 로그 참조 위치(파일/콘솔 캡처)를 checklist/runbook에 교차 연결
-- [ ] 스크린샷/영상 링크를 runbook evidence 섹션에 정리
-
-## 4.5 보류 메모
-
-현재 기준 보류 항목은 없다.
-
-주의:
-- 본 상태는 `docs/ops/device_validation.md`에 기록된 PASS 문서 기준이다.
-- 배포 승인 전에는 SP-07 증빙 패키지(타임스탬프/빌드/로그/미디어 링크) 정리가 필요하다.
+## 1.3 현재 우선순위
+1. SP-07 증빙 패키지 완결
+2. post-deploy runtime 이슈 재발률 관측
+3. SP-08 착수 기준선 확정
 
 ---
 
-# 5. SP-05 운영 기능
+# 2. 공통 아키텍처/데이터 기준선
 
-목표:
-- 실제 예배 운영에서 사용할 기능 구현
+## 2.1 Canonical Firestore 경로
+- `teams/{teamId}/projects/{projectId}/segmentA_setlist/{itemId}`
+- `teams/{teamId}/projects/{projectId}/liveCue/state`
+- `teams/{teamId}/projects/{projectId}/sharedNotes/main`
+- `teams/{teamId}/userProjectNotes/{noteId}`
+- `teams/{teamId}/songRefs/{songId}`
+- `songs/{songId}`
+- `users/{uid}/ClientProbe/mobile`
 
-주의:
-- SP-05의 공식 완료 판정은 `SP-05-1 ~ SP-05-4` 기준으로 이미 충족되었다.
-- 아래 5.2~5.7 세부 분해안은 초기 백로그 초안이며, 현재 Release Gate 판정의 기준 체크리스트는 아니다.
+원칙:
+- canonical 외 병렬 경로 신설 금지(명시 승인 없이는 불가)
+- 경로 변경은 아키텍처 변경으로 간주한다.
 
-## 5.1 SP-05-1 운영자 → 팀 진입
+## 2.2 라우팅 기준선
+- `/admin`
+- `/teams/:teamId`
+- `/teams/:teamId/projects/:projectId`
+- `/teams/:teamId/projects/:projectId/live`
+- `/teams/:teamId/songs/:songId`
 
-상태: 완료
+운영 동선:
+`admin -> team -> project -> setlist/liveCue`
 
-완료 내용:
+## 2.3 좌표/스키마 계약
+- 좌표: 상대 좌표 `0.0 ~ 1.0`
+- 정밀도: fixed-8
+- 스키마 버전: `relative-v1`
 
-- 운영자 팀 목록에서 팀 홈 진입 가능
-- 팀 리스트 항목 onTap 경로 추가
-- 명시적 버튼으로 팀 홈 열기 추가
-- global admin 기반 접근 허용
-- teamId trim / validation / encode 반영
-- 회귀 테스트 추가
-
-검증:
-- `flutter analyze` 통과
-- `flutter test --reporter=compact` 통과
-- `bash scripts/ci/test_rules.sh` 통과
-
-남은 리스크:
-- global admin이 팀 멤버가 아닐 경우,
-  일부 팀 프로젝트 데이터 read는 rules 상 제한될 수 있음
-- 운영자 계정의 팀 내 쓰기 액션은 아직 별도 검증 필요
-
-## 5.2 SP-05-2 setlist 관리
-
-상태: 예정
-
-할 일:
-
-- [ ] setlist 목록 조회 안정화
-- [ ] setlist 생성
-- [ ] setlist 수정
-- [ ] setlist 저장
-- [ ] setlist 항목 삭제/복구 정책 정리
-
-완료 조건:
-
-- 운영자가 프로젝트 내 setlist를 생성/수정/저장할 수 있음
-- setlist 데이터가 canonical 경로에 저장됨
-- 실시간 반영과 저장 상태가 UI에 명확히 표현됨
-
-## 5.3 SP-05-3 곡 순서 변경
-
-상태: 예정
-
-할 일:
-
-- [ ] drag reorder
-- [ ] 순서 변경 persistence
-- [ ] reorder 이후 LiveCue ordering 정합성 유지
-- [ ] 충돌 시 fallback 규칙 명확화
-
-완료 조건:
-
-- 곡 순서 변경 후 setlist order가 저장됨
-- 재접속 후 동일 순서 복원
-- LiveCue 현재/다음 곡 계산이 reorder 후에도 정확함
-
-## 5.4 SP-05-4 곡 빠른 이동
-
-상태: 예정
-
-할 일:
-
-- [ ] 특정 곡 즉시 이동
-- [ ] setlist index jump
-- [ ] 현재 곡 표시/UI 동기화
-
-완료 조건:
-
-- 운영자가 특정 곡으로 즉시 이동 가능
-- 운영/전체화면/구독 클라이언트에 동일 반영
-
-## 5.5 SP-05-5 다음곡 / 이전곡
-
-상태: 예정
-
-할 일:
-
-- [ ] next song
-- [ ] previous song
-- [ ] 현재 / 다음 곡 상태 동기화
-
-완료 조건:
-
-- next / previous 제어가 setlist ordering과 일치
-- 잘못된 곡 참조 / fallback mismatch 없음
-
-## 5.6 SP-05-6 cue 이동
-
-상태: 예정
-
-할 일:
-
-- [ ] cue index 이동
-- [ ] current cue broadcast
-- [ ] currentCueLabel / songId / title+key fallback 정합성 유지
-
-완료 조건:
-
-- cue 이동이 LiveCueResolvedState 규칙과 충돌하지 않음
-- 운영/전체화면 동기화 유지
-
-## 5.7 SP-05-7 운영자 UI 기본 기능
-
-상태: 예정
-
-할 일:
-
-- [ ] 운영자 컨트롤 패널
-- [ ] 현재 곡 상태 표시
-- [ ] next 곡 상태 표시
-- [ ] cue 상태 표시
-- [ ] 운영자 동선 최소화
-- [ ] 오류/로딩/저장 상태 표현 개선
-
-완료 조건:
-
-- 실제 예배 운영에서 핵심 제어를 1~2단계 안에 수행 가능
-- 운영자 화면이 읽기/제어 관점에서 일관됨
-
-## 5.8 SP-05 전체 완료 기준
-
-- [x] 운영자 → 팀 진입
-- [ ] setlist 관리
-- [ ] 곡 순서 변경
-- [ ] 곡 빠른 이동
-- [ ] 다음곡 / 이전곡
-- [ ] cue 이동
-- [ ] 운영자 UI 기본 기능
+## 2.4 Next.js Viewer Positioning
+- 장기 핵심 엔진이 아니다.
+- Flutter 경로 정상 시 우선 사용하지 않는다.
+- web fallback / 브라우저 특수 이슈 우회 계층으로 유지한다.
 
 ---
 
-# 6. SP-06 협업 기능
+# 3. SP-01 App Foundation (완료)
 
+## 3.1 목표
+- iOS/Android 실행 경로 확보
+- 모바일 로그인/인증 경로 확보
+- Firebase read/write probe 기준선 확보
+
+## 3.2 범위
+포함:
+- 플랫폼 실행
+- Firebase Auth 연결
+- Firestore probe write/read
+
+비포함:
+- LiveCue 엔진 리팩토링
+- 운영 기능 확장
+
+## 3.3 Workstreams
+### WS-01 플랫폼 실행 기준선
+- iOS 플랫폼 생성/실행
+- Android 플랫폼 생성/실행
+
+### WS-02 모바일 인증 기준선
+- 모바일 Google 로그인 경로 확인
+- 사용자 세션 생성 검증
+
+### WS-03 Firestore Probe 기준선
+- `users/{uid}/ClientProbe/mobile` write/read 성공 검증
+
+## 3.4 DoD
+- [x] iOS 실행 성공
+- [x] Android 실행 성공
+- [x] 모바일 로그인 성공
+- [x] probe write/read 성공
+- [x] 정적 검증 3종 통과
+
+## 3.5 잔여 리스크
+- 기준선은 충족, 운영 회귀는 SP-07 이후 first-error 루프로 재관측
+
+---
+
+# 4. SP-01A Bridge Security Hardening (완료)
+
+## 4.1 목표
+- Host/Viewer 브릿지 보안 경계 강화
+
+## 4.2 Workstreams
+### WS-01 postMessage 보안 기본값 제거
+- `targetOrigin='*'` 제거
+
+### WS-02 Origin Whitelist 도입
+- 허용 도메인만 메시지 수신/전송
+
+### WS-03 토큰 전달 경계 재검증
+- Host -> Viewer 토큰 전달 방식 점검
+
+## 4.3 DoD
+- [x] wildcard origin 제거
+- [x] whitelist 정책 반영
+- [x] 토큰 전달 경계 재검증 기록
+
+## 4.4 리스크
+- 도메인/환경 추가 시 whitelist 드리프트 가능
+
+---
+
+# 5. SP-02 LiveCue Sync Core 신뢰화 (완료)
+
+## 5.1 목표
+- 운영자 선택 상태와 LiveCue 로드 상태를 신뢰 가능한 단일 해석으로 정렬
+
+## 5.2 범위
+포함:
+- current/next 해석 규칙
+- stream ordering 안정화
+- fallback 해석 안정화
+
+비포함:
+- 렌더 엔진 분리
+- 입력 엔진 분리
+
+## 5.3 Workstreams
+### WS-01 current 해석 우선순위 정렬
+해석 순서:
+1. `currentCueLabel`
+2. `songId`
+3. `title+key`
+
+### WS-02 stream ordering 안정화
+- listener 중복 제거
+- stale emission drop
+- generation/sequence trace 강화
+
+### WS-03 fallback 신뢰화
+- unresolved state에서 안전 fallback 정책 적용
+- mismatch 재현 저감
+
+## 5.4 DoD
+- [x] 운영자 선택 곡이 LiveCue 동일 로드
+- [x] stream ordering 역전/충돌 미재현
+- [x] score load failure 핵심 시나리오 재현 제거
+- [x] 관련 테스트/정적 검증 통과
+
+## 5.5 잔여 리스크
+- 실사용 장시간 세션에서 간헐 race 가능성(관측 대상)
+
+---
+
+# 6. SP-03 LiveCue 책임 분리 (완료)
+
+## 6.1 목표
+- Sync/Render/Input/Persistence 책임 충돌 제거
+- 단일 소유자 구조 확립
+
+## 6.2 단계별 Workstreams
+### WS-01 구조 분석/경계 정의
+- `live_cue_page.dart` 책임 분류
+- side-effect/hotspot 식별
+
+### WS-02 SyncCoordinator 분리
+- cue/setlist snapshot 해석 책임 이관
+- attach/detach/lifecycle 단일화
+
+### WS-03 RenderPresenter 분리
+- preview/warm/fallback/viewport 책임 이관
+
+### WS-04 StrokeEngine 분리
+- begin/append/end/erase/undo/clear/tool state 이관
+
+### WS-05 NotePersistenceAdapter 분리
+- private/shared load/save/migrate 책임 이관
+
+## 6.3 DoD
+- [x] 4계층 분리 완료
+- [x] UI 직접 상태 소유 제거
+- [x] build side-effect 위험 구간 축소
+- [x] 정적 검증/관련 테스트 통과
+
+## 6.4 잔여 리스크
+- 통합 대형 파일 유지보수 비용
+- UI 통합 레이어에 로직 재침투 가능성
+
+---
+
+# 7. SP-04 Runtime Stability (완료: 구현+문서 PASS)
+
+## 7.1 목표
+- 실기기/장시간 세션에서 입력/렌더/메모리 안정성 확보
+
+## 7.2 범위
+포함:
+- pointer/stylus 안정화
+- orientation 대응
+- preload 충돌 방지
+- cache/eviction 전략
+- 드로잉 중 불필요 rebuild 축소
+
+비포함:
+- 새 기능 추가
+- 엔진 구조 변경
+
+## 7.3 Workstreams
+### WS-01 Pointer/Stroke 안정화
+- 입력 device 필터링
+- active pointer lifecycle 정리
+
+### WS-02 Orientation 대응
+- 회전/리사이즈 시 안전 재계산
+- active pointer 정리
+
+### WS-03 Cache Safety
+- ImageCache 상한
+- preview cache LRU eviction
+- future cache 제한
+
+### WS-04 Preload/Render 충돌 완화
+- drawing 중 preload 억제
+- fallback과 input 충돌 최소화
+
+### WS-05 검증 패키지 정리
+- 실기 시나리오 결과를 문서로 구조화
+
+## 7.4 DoD
+- [x] pointer/orientation/preload/cache 하드닝 반영
+- [x] 정적 검증 3종 통과
+- [x] `docs/ops/device_validation.md` 시나리오 PASS 문서화
+- [ ] runbook/checklist에 시각/빌드/로그/미디어 링크 1:1 연결
+
+## 7.5 잔여 리스크
+- 실기 결과는 PASS 문서화 완료, 릴리스 승인용 증빙 패키지 연결 작업이 남음
+
+---
+
+# 8. SP-05 Product Features (완료)
+
+## 8.1 목표
+- 운영자 동선에서 실운영 필수 기능 제공
+
+## 8.2 SP-05-1 운영자 -> 팀 진입 (완료)
+### Workstream
+- 운영자 팀 목록 진입 경로
+- 팀 홈 라우팅/context 전달 안정화
+- global admin 접근 정책 반영
+
+### DoD
+- [x] `/admin`에서 팀 진입 가능
+- [x] teamId 누락/오염 방어
+- [x] blank body 회귀 방지
+
+## 8.3 SP-05-2 setlist CRUD (완료)
+### Workstream
+- `segmentA_setlist` 조회
+- 생성/수정/삭제
+- 재진입 시 데이터 유지
+
+### DoD
+- [x] CRUD 전부 동작
+- [x] canonical 경로 저장
+- [x] 컨텍스트(teamId/projectId) 누락 없음
+
+## 8.4 SP-05-3 reorder + cue 이동 (완료)
+### Workstream
+- reorder 저장 전략
+- cue 이동 시 liveCue/state 반영
+- current/next 정합성 유지
+
+### DoD
+- [x] reorder 저장/재진입 유지
+- [x] cue 이동 반영
+- [x] current/next 해석 일관성
+
+## 8.5 SP-05-4 운영자 UI 안정화 (완료)
+### Workstream
+- loading/empty/error UI 정리
+- admin -> team -> project -> setlist 동선 안정화
+- 라우터 파라미터 검증 강화
+
+### DoD
+- [x] 주요 운영 동선에서 blank screen 제거
+- [x] null/invalid context 방어
+- [x] 오류 메시지 명시화
+
+## 8.6 SP-05 전체 DoD
+- [x] 운영자 기본 동선 완성
+- [x] setlist 조작/이동 기능 완성
+- [x] LiveCue 진입 전 운영 경로 안정성 확보
+
+## 8.7 잔여 리스크
+- 운영자 권한과 팀 멤버십 경계에서 일부 read 제한 케이스 관측 필요
+
+---
+
+# 9. SP-06 Runtime Guard / Observability (완료)
+
+## 9.1 목표
+- 운영 중 데이터/상태 불일치 조기 감지 및 안전 fallback 적용
+
+## 9.2 범위
+포함:
+- runtime guard 계층
+- ops metrics
+- router guard
+- setlist integrity guard
+- host-viewer init payload validation
+
+비포함:
+- canonical 모델 변경
+- 엔진 구조 변경
+
+## 9.3 Workstreams
+### WS-01 Runtime Guard Layer
+- invalid/null snapshot/state 방어
+- fallback/에러 상태 표준화
+
+### WS-02 LiveCue State Validation
+- current/next/index 유효성 검증
+- invalid 상태 시 안전 복구 경로
+
+### WS-03 Setlist Integrity Guard
+- reorder 후 order 연속성 검증
+- empty setlist 시 current/next clear 정책
+
+### WS-04 Router Parameter Guard
+- teamId/projectId/songId 형식 검증
+- invalid route 안전 처리
+
+### WS-05 Ops Metrics
+핵심 metric:
+- `runtime_guard_triggered`
+- `livecue_state_invalid`
+- `setlist_order_invalid`
+- `router_invalid_id`
+- `firestore_snapshot_error`
+
+## 9.4 DoD
+- [x] guard/metric 핵심 축 반영
+- [x] critical flow 보호 확인
+- [x] 정적 검증 3종 통과
+
+## 9.5 잔여 리스크
+- metric 노이즈와 실제 장애 상관성 튜닝 필요
+
+---
+
+# 10. SP-07 Release Gate (진행중)
+
+## 10.1 목표
+- 배포 가능 여부를 문서/검증/증빙으로 최종 판정
+
+## 10.2 범위
+포함:
+- static gate
+- functional gate
+- runtime gate
+- device validation evidence 연결
+- first-error/regression 운영 루프 준비
+
+비포함:
+- 신규 제품 기능 개발
+- 엔진 구조 재설계
+
+## 10.3 Workstreams
+### WS-01 Static Gate 확정
+- analyze/test/rules 최신 PASS 확보
+
+### WS-02 Functional Gate 점검
+- admin -> team -> project -> setlist/liveCue 동선
+- setlist CRUD/reorder/cue 이동 회귀 확인
+
+### WS-03 Runtime Gate 점검
+- guard/metric 동작
+- invalid route/state 방어
+
+### WS-04 Device Evidence 연결
+- `device_validation.md` 결과를 checklist/runbook 증빙 필드와 연결
+
+### WS-05 Release Evidence 패키지 완결
+필수 필드:
+- timestamp(KST)
+- build/release version
+- log reference
+- screenshot/video link
+
+### WS-06 승인 판정 기록
+- `APPROVED` 또는 `BLOCKED` 근거 기록
+
+## 10.4 DoD
+- [x] static gate PASS
+- [x] 기능/런타임 게이트 기준 정렬
+- [x] device validation PASS 문서 반영
+- [ ] release evidence 패키지 필드 100% 연결
+- [ ] 최종 승인 판정(Approved/Blocked) 기록
+
+## 10.5 현재 판정
+- 상태: Release Candidate (운영 모니터링/증빙 정렬 단계)
+- 주의: 증빙 완결 전 `최종 승인 완료`로 표기하지 않음
+- 판정 분리:
+  - 배포 실행 상태: 환경/시점별로 존재할 수 있으나 본 문서는 승인 상태와 분리해 관리
+  - Release Gate 승인 상태: `Pending Evidence` (증빙 패키지 완결 전)
+- 해석 원칙: post-deploy 이슈 관측 기록이 존재하더라도, 이는 `운영 데이터 존재`를 뜻하며 `최종 승인 완료`를 의미하지 않는다.
+
+## 10.6 SP-07 잔여 리스크
+- 문서 PASS와 운영 로그 증빙 간 링크 누락 가능성
+- post-deploy runtime issue 재발 여부에 따른 승인 판정 변경 가능성
+
+---
+
+# 11. SP-08 Score System & Library Expansion (상세)
+
+상태: 예정 (SP-07 증빙 마감 후 착수)
+
+## 11.1 목표
+- score preview UX를 제품 전 구간에서 통일
+- 관리자 중심 업로드 병목을 사용자 보조 성장 구조로 완화
+- score resolution 실패율 구조적 축소
+- 기존 운영 경로와 하위호환 유지
+
+## 11.2 범위
+포함:
+- 인앱 score preview 통일
+- `songs_pending` 기반 제출/검수/승격 플로우
+- title/key/songId 기반 매칭 강화
+- searchable token 체계 확장
+
+비포함:
+- 전면 아키텍처 재작성
+- canonical 모델 대규모 마이그레이션
+- LiveCue 엔진 ownership 변경
+
+## 11.3 Workstreams
+### WS-01 Unified In-App Score Preview
 목표:
-- 팀 단위 협업을 위한 shared layer / shared cue / multi-user sync 안정화
+- 라이브러리/프로젝트/LiveCue 진입점에서 인앱 프리뷰 기본화
 
-주의:
-- 이 섹션은 협업 기능 백로그 초안이다.
-- 현재 공식 SP-06 완료 상태(웹 런타임 운영 가드 강화)와는 별개로 관리한다.
+세부:
+- 대상 진입점 명시:
+  - admin score library: `lib/features/songs/global_song_panel.dart`
+  - user score library: `lib/features/songs/song_detail_page.dart`
+  - project score preview: project/setlist 진입 UI
+  - LiveCue score preview: LiveCue 내 score 확인 진입 UI
+- 엔트리 포인트별 preview 동작 매트릭스 작성
+- 기본 렌더링은 인앱 preview dialog/modal로 통일
+- 강제 새 탭 열기 동작은 제거하고, 선택형 fallback 액션으로만 유지
+- 지원 포맷을 명시적으로 고정:
+  - `jpg`
+  - `png`
+  - `jpeg`
+  - `webp`
+  - `pdf`
 
-## 6.1 shared layer 안정화
+DoD:
+- [ ] 주요 진입점 모두 인앱 프리뷰 우선
+- [ ] 새 탭 fallback은 선택적 옵션으로만 노출
+- [ ] preview dialog/modal 렌더링이 주요 진입점에서 동일 동작
+- [ ] 지원 포맷(`jpg/png/jpeg/webp/pdf`)이 동일 정책으로 표시
 
-할 일:
+### WS-02 User-Contributed Song Database
+목표:
+- 사용자 제출형 확장 경로 도입
 
-- [ ] shared layer 로드 정합성
-- [ ] shared layer 저장 정합성
-- [ ] 재접속 복원 검증
-- [ ] private/shared 혼합 편집 안전성 점검
+세부:
+- 데이터 구조:
+  - canonical: `songs/{songId}`
+  - moderation queue: `songs_pending/{submissionId}`
+- `songs_pending/{submissionId}` 컬렉션 계약 정의
+- 검수 상태(`pending/approved/rejected/needs_edit`) 정의
+- 관리자 검수 UI/운영 프로세스 문서화
+- 제출 메타데이터 계약:
+  - 필수: `title`, `key`, `fileUrl`, `uploaderUid`, `createdAt`
+  - 선택: `artist`, `bpm`, `tags`, `category`, `aliases`
+- 관리자 액션 명시:
+  - `approve`
+  - `reject`
+  - `request edit`
+  - `merge duplicate`
+- 제품 목표:
+  - 관리자 업로드 병목 완화
+  - 곡 DB 성장 속도 향상
+  - 커뮤니티 기여 기반 확장
 
-완료 조건:
+DoD:
+- [ ] 제출 -> 검수 -> 승격 플로우 동작
+- [ ] canonical `songs/{songId}` 오염 방지 규칙 반영
+- [ ] 필수/선택 메타데이터 계약이 문서/코드에서 일치
+- [ ] moderation 액션(approve/reject/request edit/merge duplicate) 동작 정의 완료
 
-- 사용자 A 필기가 사용자 B에 안정적으로 반영됨
-- shared layer 저장/복원이 재접속 후 유지됨
+### WS-03 Score Matching Stabilization
+목표:
+- setlist/LiveCue/library 간 해상도 실패율 저감
 
-## 6.2 shared cue
+해석 우선순위:
+1. `songId` direct
+2. `teams/{teamId}/songRefs`
+3. canonical title+key exact
+4. normalized token fallback
 
-할 일:
+세부:
+- 장식 문자열 제거 규칙(예: 숫자 prefix, 표시용 접미)
+- canonical title/key 정규화 규칙
+- 누락 `songId` backfill 정책
+- full Firestore collection scan 금지(인덱스 쿼리 + 토큰 기반 조회 우선)
+- legacy project setlist 호환을 유지하는 fallback 규칙 고정
 
-- [ ] shared cue 상태 모델 정의
-- [ ] cue broadcast 범위 정리
-- [ ] 운영자/인도자/뷰어 반영 정책 정리
+DoD:
+- [ ] known 실패 케이스 재현률 유의미 감소
+- [ ] decorated string로 인한 조회 실패 제거
+- [ ] score not found 오류율 감소 추세 확인
+- [ ] full scan 없이 조회 성능/비용 기준 충족
 
-완료 조건:
+### WS-04 Search Token Growth Mechanism
+목표:
+- 라이브러리 재사용률 향상, 중복 생성 억제
 
-- 팀 단위 cue 공유가 LiveCue 프로토콜과 충돌하지 않음
+세부:
+- `searchTokens` 생성 전략(공백/별칭/축약/로마자)
+- 유사 제목 중복 탐지 규칙
+- 관리자 merge 정책
+- 토큰 생성 예시(제목: `주의 집에 거하는 자`):
+  - 기본 토큰: `주의`, `집에`, `거하는`, `자`
+  - 파생 토큰: 공백 변형, 축약형, 로마자, `title+key` 조합
 
-## 6.3 multi-user sync 안정성
+DoD:
+- [ ] 부분 검색 성공률 향상
+- [ ] 중복 song 생성률 감소 추세 확인
 
-할 일:
+### WS-05 Backward Compatibility
+목표:
+- 기존 프로젝트 데이터 강제 마이그레이션 없이 동작
 
-- [ ] 동시 진입 안정성
-- [ ] generation/sequence 관찰 강화
-- [ ] listener 중복/경쟁 조건 재검증
-- [ ] reconnect 후 ordering 안정성 검증
+세부:
+- legacy setlist 항목 fallback 유지
+- 점진적 backfill 전략
+- 실패 케이스 운영 로그 수집
 
-완료 조건:
+DoD:
+- [ ] 기존 setlist 재진입/조회/프리뷰 회귀 없음
 
-- 다중 사용자 환경에서 sync ordering 충돌이 재현되지 않음
+## 11.4 검증 기준
+- `flutter analyze` PASS
+- `flutter test --reporter=compact` PASS
+- `bash scripts/ci/test_rules.sh` PASS
+- 수동 시나리오:
+  - admin library/user library/project/LiveCue 동일 곡 프리뷰 일관성
+  - 지원 포맷(`jpg/png/jpeg/webp/pdf`) 렌더링 일관성
+  - missing `songId` fallback/backfill 성공
+  - fallback 새 탭 동작은 옵션 경로에서만 활성
 
-## 6.4 필기 충돌 처리
+## 11.5 리스크
+- song metadata 품질 편차로 fallback 오탐 가능
+- 제출형 DB 도입 시 검수 대기 적체 가능
 
-할 일:
+---
 
-- [ ] 동시 편집 충돌 정책 정의
-- [ ] layer 충돌 시 우선순위 정리
-- [ ] 충돌 회복 UX 정의
-- [ ] partial save / stale overwrite 방지
+# 12. SP-09 Music Metadata Layer (상세)
 
-완료 조건:
+상태: 예정
 
-- 동시 필기 시 데이터 손실/겹침 규칙이 명확하고 재현 가능함
+## 12.1 목표
+- setlist item 단위 음악 메타데이터를 구조화해 운영 품질 향상
+- LiveCue에서 read-only 소비 가능한 표준 메타 계약 확립
 
-## 6.5 사용자 권한
+## 12.2 범위
+포함:
+- `segmentA_setlist/{itemId}` 메타 필드 확장
+- 운영자 편집 UI 입력/검증
+- LiveCue current/next 메타 read-only 노출
 
-권한 축:
+비포함:
+- 자동 편곡/추천
+- 오디오 DSP/분석 엔진
 
+## 12.3 데이터 계약(초안)
+필수/권장 필드:
+- `tempoBpm` (int, 20~300)
+- `timeSignature` (string, 예: `4/4`, `3/4`, `6/8`)
+- `sectionMarkers` (list, optional)
+- `arrangementNote` (string, optional)
+- `keyText` (기존 규약 재사용)
+
+정합성 규칙:
+- 범위 외 값은 저장 차단
+- null 허용 필드와 미입력 필드를 구분
+- legacy 항목은 기본값 강제가 아니라 optional 소비
+
+## 12.4 Workstreams
+### WS-01 Metadata Contract Definition
+세부:
+- 필드 타입/범위/기본값/누락 정책 확정
+- 문서(`data_model.md`, `livecue_protocol.md`) 동기화
+
+DoD:
+- [ ] 메타 계약 표 확정
+- [ ] 저장/조회 경로에서 타입 드리프트 없음
+
+### WS-02 Admin Editing UX
+세부:
+- setlist 항목 편집 패널에 메타 입력 추가
+- 저장 전 validation + 오류 메시지 표준화
+
+DoD:
+- [ ] invalid metadata 저장 차단
+- [ ] 오류 메시지 사용자 이해 가능 수준
+
+### WS-03 LiveCue Consumption
+세부:
+- current/next 영역 read-only 표기
+- sync/input/render ownership 침범 금지
+
+DoD:
+- [ ] 메타 표시는 가능, 엔진 소유권 침범 없음
+
+### WS-04 Legacy Compatibility + Backfill
+세부:
+- 메타 없는 기존 항목 호환
+- 선택적 backfill 유틸리티
+
+DoD:
+- [ ] 기존 데이터로 회귀 없음
+- [ ] backfill 실행 여부와 무관하게 앱 정상 동작
+
+### WS-05 Observability
+세부:
+- metadata validation failure 로그
+- out-of-range 입력 빈도 추적
+
+DoD:
+- [ ] metadata 오류가 무음 실패되지 않음
+
+## 12.5 SP-09 DoD
+- [ ] metadata 저장/조회 구현
+- [ ] validation 정책 반영
+- [ ] LiveCue read-only 소비 반영
+- [ ] legacy 호환성 확인
+- [ ] 정적 검증 3종 통과
+
+## 12.6 검증 포인트
+- setlist 재진입 시 metadata 유지
+- current/next 전환 시 metadata 일관성
+- 잘못된 값 입력 시 저장 차단 + 안내 메시지
+
+## 12.7 리스크
+- metadata 필드 확장으로 UI 복잡도 증가
+- 운영자 입력 품질 편차
+
+---
+
+# 13. SP-10 Performance Assistance Layer (상세)
+
+상태: 예정
+
+## 13.1 목표
+- 라이브 운영 보조 기능(tempo/count-in/timer/scroll) 제공
+- 코어 sync/input 안정성 훼손 없이 보조 계층으로 구현
+
+## 13.2 범위
+포함:
+- tempo tap
+- count-in
+- cue timer
+- auto scroll assist
+- SP-09 metadata(`tempoBpm`, `timeSignature`) 기반 보조 기능 연동
+
+비포함:
+- MIDI 연동
+- 오디오 DSP
+- LiveCue 코어 엔진 재설계
+
+## 13.3 Workstreams
+### WS-01 Tempo Tap Engine
+세부:
+- 탭 간격 기반 BPM 계산
+- 이상치 제거/안정화 평균
+- setlist item `tempoBpm` 존재 시 초기 템포 기준값으로 연동
+
+DoD:
+- [ ] 느린/빠른 탭 입력에서 BPM 안정 출력
+- [ ] metadata 연동 시에도 수동 탭 보정 로직 충돌 없음
+
+### WS-02 Count-in Flow
+세부:
+- 시작/취소/재시작 상태 모델
+- 곡 전환/큐 이동과의 충돌 방지
+
+DoD:
+- [ ] count-in 상태 전이 deterministic
+
+### WS-03 Cue Timer
+세부:
+- 경과 시간 표시
+- pause/resume/reset
+- 재진입 시 정책(복원/초기화) 명시
+
+DoD:
+- [ ] 타이머 상태가 전이 규칙대로 유지
+
+### WS-04 Auto Scroll Assist
+세부:
+- 속도 프리셋/사용자 커스텀
+- 사용자 수동 조작 시 즉시 중단
+- 장시간 세션 성능 영향 측정
+
+DoD:
+- [ ] auto scroll이 필기/입력과 충돌하지 않음
+
+### WS-05 Runtime/Observability Guard
+세부:
+- `assist_start/assist_stop/assist_error` 로그
+- 세션 메모리/리빌드 영향 관측
+
+DoD:
+- [ ] 보조 기능 장애가 운영 로그로 추적 가능
+
+## 13.4 SP-10 DoD
+- [ ] tempo tap/count-in/timer/scroll 기본 기능 동작
+- [ ] core sync/input 경계 침범 없음
+- [ ] 장시간 세션 성능 회귀 허용 범위 내
+- [ ] 정적 검증 3종 통과
+
+## 13.5 검증 포인트
+- BPM 계산 일관성
+- `tempoBpm/timeSignature` metadata 반영 일관성
+- 곡 전환 중 보조 기능 상태 전이
+- 필기 중 auto scroll 충돌 여부
+
+## 13.6 리스크
+- 보조 기능 추가로 UI 복잡도 증가
+- timer/scroll 상태가 sync 이벤트와 경쟁할 수 있음
+
+---
+
+# 14. SP-11 Collaboration Layer (상세)
+
+상태: 예정
+
+## 14.1 목표
+- multi-user 협업을 위한 shared note/cue/presence 기반 확장
+- 충돌/권한/동시성 규칙을 deterministic하게 정의
+
+## 14.2 범위
+포함:
+- shared notes 협업
+- presence 모델
+- cue 협업 동기화
+- 충돌 처리/권한 정책
+- comment system (문맥 기반 코멘트/스레드)
+
+비포함:
+- 음성/영상 실시간 통신
+- 전역 권한 체계 전면 개편
+
+## 14.3 Workstreams
+### WS-01 Collaboration Contract
+세부:
+- 이벤트 모델(`join/leave/edit/commit/sync`)
+- revision/token 기반 ordering 정책
+
+DoD:
+- [ ] 이벤트 계약 문서+코드 정렬
+
+### WS-02 Presence Model
+세부:
+- online/idle/offline 상태
+- heartbeat/TTL 정책
+
+DoD:
+- [ ] presence state 오탐/유실률 허용 범위 내
+
+### WS-03 Shared Notes Concurrency
+세부:
+- 동시 편집 충돌 정책(last-write 금지 여부 포함)
+- 병합 가능/차단 범위 정의
+
+DoD:
+- [ ] 동시 편집에서 데이터 유실 재현 방지
+
+### WS-04 Cue Collaboration
+세부:
+- 변경 주체 우선순위(leader/admin)
+- 중복 명령/역전 이벤트 방어
+- stale event 처리 규칙 강화
+
+DoD:
+- [ ] 다중 기기 cue ordering deterministic
+
+### WS-05 Role/Permission Matrix
+역할:
 - viewer
 - editor
 - leader
 - team admin
 - global admin
 
-할 일:
+세부:
+- 역할별 read/write 범위 확정
+- rules/UI/code 정합성 검증
 
-- [ ] viewer / editor 권한 구분
-- [ ] shared/private 편집 범위 구분
-- [ ] 운영자 경로와 팀 경로 권한 정책 정리
-- [ ] Firestore rules / UI 동작 정합성 검증
+DoD:
+- [ ] 무권한 write 차단 + 사용자 피드백 일관성
 
-완료 조건:
+### WS-06 Observability + Incident Runbook
+세부:
+- 협업 전용 metric 확장
+- incident runbook 협업 시나리오 추가
 
-- 역할별 읽기/쓰기 범위가 문서/규칙/코드에서 일치함
+DoD:
+- [ ] 협업 장애 원인 추적 가능한 로그 체계
 
-## 6.6 SP-06 전체 완료 기준
+### WS-07 Comment System
+세부:
+- score/setlist/liveCue 문맥 기반 코멘트 스레드 모델 정의
+- 코멘트 생성/수정/삭제 권한 정책 정의
+- 코멘트 알림/미확인 상태 표기 정책 정의
 
-- [ ] shared layer 안정화
-- [ ] shared cue 정의
-- [ ] multi-user sync 안정성 확보
-- [ ] 필기 충돌 처리 정책 정리
-- [ ] viewer/editor/leader 권한 정합성 확보
+DoD:
+- [ ] comment thread 생성/조회/권한 규칙이 협업 모델과 일치
+
+## 14.4 SP-11 DoD
+- [ ] shared note 동시 편집 정책 구현
+- [ ] presence 상태 모델 구현
+- [ ] cue 협업 ordering 보장
+- [ ] comment system 정책/동작 구현
+- [ ] 권한 정책 정합성 확보
+- [ ] 정적 검증 3종 통과
+
+## 14.5 검증 포인트
+- 두 명 이상 동시 편집 시 유실/충돌 여부
+- 다중 기기 cue 이동 충돌 처리
+- comment thread 권한/동기화 일관성
+- 역할별 권한 차단 메시지 정확성
+
+## 14.6 리스크
+- 협업 기능은 race 조건 폭증 가능성 높음
+- 운영 로그 볼륨 증가로 노이즈 관리 필요
 
 ---
 
-# 7. SP-07 배포 게이트 실행 상태
+# 15. SP-12 Production Ops Maturity (상세)
+
+상태: 예정
+
+## 15.1 목표
+- 릴리스/운영 체계를 반복 가능한 표준으로 고도화
+- 증빙/모니터링/롤백/회고 루프를 제도화
+
+## 15.2 범위
+포함:
+- release train 표준화
+- gate 자동화 보강
+- monitoring/alerting 정책
+- rollback/recovery 절차
+- post-release review 정례화
+- Firebase Hosting 배포 표준화
+- production Firestore rules 검증/배포 체계
+- CI/CD 파이프라인 운영 기준
+- release tagging 체계
+
+비포함:
+- 플랫폼 전환
+- 인프라 전면 재구축
+
+## 15.3 Workstreams
+### WS-01 Release Train Standardization
+세부:
+- 버전 태깅 규칙
+- artifact naming 규칙
+- release note 템플릿
+
+DoD:
+- [ ] 릴리스 문서 형식 일관성 확보
+
+### WS-02 Gate Automation Enhancement
+세부:
+- static gate 결과 자동 수집
+- evidence 필드 자동 채움 가능한 항목 자동화
+- CI/CD 파이프라인에서 gate 결과 자동 게시
+
+DoD:
+- [ ] 수동 누락률 유의미 감소
+- [ ] CI/CD에서 gate PASS/FAIL 추적 가능
+
+### WS-03 Monitoring & Alerting
+세부:
+- 핵심 metric 대시보드
+- alert threshold/노이즈 억제 정책
+- 배포 직후 모니터링 초기 관측 절차 고정
+
+DoD:
+- [ ] critical 이슈 조기 탐지율 개선
+
+### WS-04 Rollback & Recovery
+세부:
+- 롤백 트리거 기준
+- 실행 절차/권한/책임자 명시
+- 복구 후 검증 체크리스트
+
+DoD:
+- [ ] 롤백 드릴 실행 기록 확보
+
+### WS-05 Post-Release Review Loop
+세부:
+- first-error 회고 템플릿
+- 회귀 유형 분류 체계
+- 다음 릴리스 액션아이템 연동
+
+DoD:
+- [ ] 릴리스마다 postmortem/retro 산출물 생성
+
+### WS-06 Deployment Infrastructure Governance
+세부:
+- Firebase Hosting 배포 절차/권한 분리
+- production Firestore rules 배포 전/후 검증 절차
+- release tagging 규칙(semantic/date based) 고정
+
+DoD:
+- [ ] Hosting/rules/tagging 절차가 runbook/checklist와 일치
+
+## 15.4 SP-12 DoD
+- [ ] 릴리스 프로세스 재현 가능
+- [ ] Firebase Hosting 배포 기준 확정
+- [ ] production Firestore rules 배포 검증 체계 확정
+- [ ] CI/CD 파이프라인 기준 확정
+- [ ] release tagging 기준 확정
+- [ ] 모니터링/알림/롤백 체계 운영 가능
+- [ ] post-release review 정례화
+- [ ] 정적 검증 3종 통과
+
+## 15.5 검증 포인트
+- 릴리스 증빙 누락률
+- 경보 false-positive 비율
+- 롤백/복구 리드타임
+
+## 15.6 리스크
+- 프로세스 자동화 미흡 시 문서-실행 괴리 재발
+
+---
+
+# 16. SP-13 Score System Expansion (상세)
+
+상태: 예정
+
+## 16.1 Goal
+Expand the WorshipFlow score system to support consistent preview, stable score resolution, and scalable score discovery.
+
+## 16.2 Problem
+Current score handling has several limitations:
+- score preview behavior is inconsistent across UI entry points
+- some flows still open scores in a new browser tab
+- LiveCue score resolution may fail when metadata is incomplete
+- score discoverability is limited without search indexing
+
+영향:
+- 실시간 예배 운영 중 탐색/확인 동선이 느려짐
+- 동일 곡이라도 진입점에 따라 사용자 경험이 달라짐
+
+## 16.3 Scope
+SP-13 introduces:
+1. Unified in-app score preview
+2. Stable score resolution pipeline
+3. Score preview consistency across all UI entry points
+4. Search token indexing for song discovery
+
+비범위:
+- LiveCue 엔진 ownership 구조 변경
+- canonical Firestore 경로 재설계
+
+## 16.4 Supported Preview Formats
+In-app preview must support:
+- `jpg`
+- `png`
+- `jpeg`
+- `webp`
+- `pdf`
+
+Preview must render consistently in:
+- score library
+- project score access
+- LiveCue preview
+- admin score library
+
+## 16.5 Score Resolution Pipeline
+Lookup priority order:
+1. `songId` direct match
+2. `teams/{teamId}/songRefs` mapping
+3. normalized title search
+4. `searchTokens` fallback
+
+Normalization rules:
+- remove decorated display text
+- normalize whitespace
+- normalize key values
+- support legacy setlist entries
 
 목표:
-- 배포 가능 여부를 문서/검증 근거로 최종 판정
-- 배포 자체(실행)와 배포 승인(판정)을 구분하여 관리
+- “score not found” 오류 감소
+- LiveCue score loading 안정화
 
-## 7.1 정적 게이트
+## 16.6 Implementation Areas
+Flutter UI:
+- `lib/features/songs/global_song_panel.dart`
+- `lib/features/songs/song_detail_page.dart`
+- project score preview entry points
+- LiveCue preview entry points
 
-- [x] `flutter analyze` PASS
-- [x] `flutter test --reporter=compact` PASS
-- [x] `bash scripts/ci/test_rules.sh` PASS
+Firestore:
+- `songs` collection
+- search token indexing
 
-## 7.2 실기 시나리오 문서 상태
+## 16.7 Workstreams
+### WS-01 Unified In-App Preview
+- 인앱 기본 프리뷰(새 탭 강제 제거)
+- 진입점별 UI/동작 일관성 보장
 
-- [x] `docs/ops/device_validation.md` 기준 5개 시나리오 PASS 기록 확인
-- [x] shared notes 항목 문구를 구현 모델(save-trigger persistence)과 정렬
+### WS-02 Resolution Stability
+- 4단계 해석 파이프라인 고정
+- legacy 데이터 fallback 안정화
 
-## 7.3 Release 실행 증빙 패키지 (남은 작업)
+### WS-03 Discovery Indexing
+- `searchTokens` 생성/갱신 정책
+- 부분 검색 정확도 개선
 
-- [ ] checklist/runbook에 시나리오별 실행 timestamp(KST) 연결
-- [ ] build version / release version 기입
-- [ ] 로그 참조 위치(파일/콘솔 캡처) 연결
-- [ ] 스크린샷/영상 링크를 시나리오별로 연결
+### WS-04 Regression Safety
+- 기존 project/LiveCue 동선 회귀 방지
+- 오류 메시지 구체화
 
-## 7.4 SP-07 표현 원칙
+## 16.8 Definition of Done
+SP-13 완료 조건:
+- [ ] score preview opens in-app by default
+- [ ] preview behavior is consistent across all entry points
+- [ ] LiveCue score resolution is stable
+- [ ] legacy setlist items resolve correctly
+- [ ] search token indexing improves song discovery
 
-- Release Gate 정적 검증 PASS와 기기 검증 문서 PASS는 사실로 기록한다.
-- 최종 승인 전까지는 `APPROVED/배포완료`를 선언하지 않는다.
-- Release Gate 최종 상태는 증빙 패키지 검토 후 `PASS/FAIL`로 확정한다.
-
-## 7.5 현재 판정
-
-- 상태: **Release Candidate / 배포 완료 / 운영 모니터링 단계**
-- 의미:
-  - static gate: PASS
-  - device validation: 문서 PASS
-  - release execution evidence: 정리/서명 대기
-
-## 7.6 SP-07 전체 완료 기준
-
-- [x] static gate PASS
-- [x] device validation 문서 PASS 반영
-- [x] release checklist 기준 항목 정의 완료
-- [ ] 증빙 패키지(시각/빌드/로그/미디어 링크) 완결
-- [ ] 최종 `APPROVED` 또는 `BLOCKED` 판정 기록
-
----
-
-# 8. SP-07 이후 개발
-
-## 8.1 운영자 모드 확장
-
-주의:
-- SP-05-1 운영자 → 팀 진입은 이미 완료됨
-- 여기서는 그 이후 확장 범위를 다룬다
-
-할 일:
-
-- [ ] 운영자 팀 목록 조회 UX 고도화
-- [ ] 운영자 → 프로젝트 진입 확장
-- [ ] 운영자 → LiveCue 직접 진입 확장
-- [ ] 팀 LiveCue 상태 조회
-- [ ] 팀 LiveCue 제어
-- [ ] 팀 컨텍스트 routing 확장
-- [ ] global admin 프로젝트 읽기 범위 정책 정리
-
-## 8.2 이후 단계(선택)
-
-필요 시:
-
-- [ ] offline 모드
-- [ ] PWA 지원
-- [ ] iPad 앱 패키징
-- [ ] Android 태블릿 지원
+## 16.9 Verification
+Required checks:
+- [ ] `flutter analyze` PASS
+- [ ] `flutter test --reporter=compact` PASS
+- [ ] `bash scripts/ci/test_rules.sh` PASS
+- [ ] manual preview verification
 
 ---
 
-# 9. Web Fallback / Next Viewer 계획
+# 17. SP-14 Community Song Contribution Pipeline (상세)
 
-## 9.1 현재 위치
+상태: 예정
 
-Next.js Viewer는 핵심 엔진이 아니라 **web fallback / 보조 경로**다.
+## 17.1 Goal
+Enable scalable song database growth through community contribution with moderation and canonical database integration.
 
-현재 역할:
+## 17.2 Problem
+현재 곡 DB는 관리자 업로드 의존도가 높아 다음 문제가 있다:
+- database growth is slow
+- admin workload increases over time
+- users cannot contribute missing songs
+- duplicate songs may appear across teams
 
-- 긴급 조회 경로
-- 웹 운영 보조 경로
-- 브라우저 특수 이슈 우회 경로
+## 17.3 Contribution Flow
+Pipeline model:
+`User -> Upload -> Moderation -> Global DB`
 
-## 9.2 하지 않는 역할
+Steps:
+1. user uploads song score
+2. submission stored in pending collection
+3. admin reviews submission
+4. approved songs are inserted into canonical DB
 
-웹 fallback은 다음 책임을 장기 핵심 책임으로 갖지 않는다.
+## 17.4 Firestore Data Model
+Canonical song database:
+- `songs/{songId}`
 
-- 주 편집 엔진
-- 모바일 UX 기준 플랫폼
-- 앱보다 우선하는 릴리즈 기준 플랫폼
-- LiveCue 핵심 책임의 영구 소유자
+Pending submissions:
+- `songs_pending/{submissionId}`
 
-## 9.3 유지/축소 판단 기준
+Submission metadata:
+- Required:
+  - `title`
+  - `key`
+  - `fileUrl`
+  - `uploaderUid`
+  - `createdAt`
+- Optional:
+  - `artist`
+  - `bpm`
+  - `tags`
+  - `category`
+  - `aliases`
 
-다음 기준으로 판단한다.
+## 17.5 Moderation Actions
+Administrators can:
+- approve submission
+- reject submission
+- request edit
+- merge duplicate songs
 
-1. Flutter 단일 경로에서 동일 버그 재현 여부
-2. Viewer 경로에서 완화 효과 존재 여부
-3. 이중 유지 비용 대비 안정성 이득
+Policy:
+- approved songs are written into `songs/{songId}`
+- rejected submissions remain in moderation logs
 
-원칙:
-- 데이터 기준으로 유지/축소를 판단한다.
-- 신념 기반으로 강제 제거하지 않는다.
+## 17.6 Database Growth Strategy
+Expected benefits:
+- scalable song database expansion
+- community-driven content growth
+- reduced administrator bottleneck
+- improved song availability across churches
 
----
+## 17.7 Safety Requirements
+The system must ensure:
+- moderation before canonical insertion
+- duplicate detection
+- metadata normalization
+- compatibility with existing projects
 
-# 10. Contract / Sync Plan
+Legacy projects must continue to work without forced schema migration.
 
-## 10.1 데이터 스키마
+## 17.8 Workstreams
+### WS-01 Submission Intake
+- 사용자 업로드 입력/검증
+- pending 저장 표준화
 
-고정 규약:
+### WS-02 Moderation Console
+- approve/reject/request edit/merge duplicate 처리
+- moderation audit log 유지
 
-- 좌표: 상대 좌표 `0.0 ~ 1.0`
-- 정밀도: fixed-8
-- 스키마 버전: `relative-v1`
+### WS-03 Canonical Integration
+- 승인 항목의 `songs/{songId}` 승격
+- 기존 song 중복/충돌 처리
 
-해야 할 일:
+### WS-04 Compatibility Guard
+- 기존 LiveCue/project 흐름 무중단 보장
+- legacy setlist 호환성 검증
 
-- [ ] NaN / Infinity / 범위 초과 값 폐기 규칙 문서화
-- [ ] layer payload validation 기준 보강
+## 17.9 Definition of Done
+SP-14 완료 조건:
+- [ ] users can submit songs
+- [ ] submissions are stored in `songs_pending`
+- [ ] admins can approve or reject submissions
+- [ ] approved songs appear in the global `songs` collection
+- [ ] existing LiveCue flows continue to function without breaking changes
 
-## 10.2 메시지 프로토콜
-
-현재 기준:
-
-- `viewer-ready`
-- `host-init`
-- `init-applied`
-- `ink-dirty`
-- `ink-commit`
-- `ink-synced`
-- `asset-cors-failed`
-
-해야 할 일:
-
-- [ ] idempotency key 정책 정리
-- [ ] 재전송 규칙 정리
-- [ ] protocol version mismatch 처리 정책 정리
-
-## 10.3 sync revision / ordering
-
-해야 할 일:
-
-- [ ] `syncRevision` 단조 증가 규칙 명시
-- [ ] generation token 규칙 문서화
-- [ ] stale emission drop 기준 문서화
-- [ ] dirty / synced 전이 규칙 정리
-
-## 10.4 Firebase 저장/권한 규칙
-
-해야 할 일:
-
-- [ ] membership source 단일화 로드맵
-- [ ] deleteQueue / opsMetrics 운영 의미 문서화
-- [ ] shared/private note persistence 권한 범위 재검토
-
----
-
-# 11. Verification / Research Refresh Loop
-
-리서치와 논리 검증은 1회성 작업이 아니라 단계별 반복 루프로 수행한다.
-
-## 11.1 루프 기준
-
-- [ ] SP-05 이후 research refresh
-- [ ] SP-06 이후 sync / collaboration verification
-- [ ] SP-07 이후 release readiness verification
-- [ ] 배포 후 platform-specific regression verification
-
-## 11.2 공통 검증 항목
-
-- [ ] 데이터 흐름 꼬임 여부
-- [ ] Future / Stream ordering 보장 여부
-- [ ] 상태 전이 충돌 여부
-- [ ] side-effect 위치 적절성
-- [ ] 실기기 회귀 여부
-- [ ] rules / runtime 정합성
-- [ ] 역할/권한 UX 충돌 여부
+## 17.10 Verification
+Required checks:
+- [ ] `flutter analyze` PASS
+- [ ] `flutter test --reporter=compact` PASS
+- [ ] `bash scripts/ci/test_rules.sh` PASS
+- [ ] submission -> approval -> global DB flow verified
 
 ---
 
-# 12. 배포 후 테스트 계획
+# 18. Cross-SP 검증 루프
 
-## 12.1 Apple Pencil 테스트
+## 18.1 Research Refresh 루프
+- SP 종료마다 `research.md` 업데이트
+- 코드와 문서 drift 재판정
 
-- [ ] latency 확인
-- [ ] stroke smoothing
-- [ ] palm rejection
-- [ ] 빠른 필기 테스트
+## 18.2 Logic Verification 루프
+매 단계 공통 점검:
+- 데이터 흐름 꼬임
+- Future/Stream ordering
+- 상태 전이 충돌
+- side-effect 위치 적절성
 
-## 12.2 공유 필기 테스트
+## 18.3 Platform Regression 루프
+- iPad/iPhone/Android 태블릿 시나리오 재검증
+- fallback 경로와 canonical 경로 동작 비교
 
-- [ ] 사용자 A 필기
-- [ ] 사용자 B 실시간 반영
-- [ ] shared layer 저장
-- [ ] 재접속 후 복원
-
-## 12.3 장시간 테스트
-
-- [ ] 30~60분 사용
-- [ ] 곡 이동 반복
-- [ ] 필기 + 저장 반복
-- [ ] 메모리 안정성 확인
-
----
-
-# 13. Release Readiness / Deployment Gate
-
-배포는 구현 완료만으로 허용되지 않는다.
-
-## 13.1 사전 배포 게이트
-
-- [ ] SP-04 ~ SP-07 핵심 게이트 충족
-- [ ] `flutter analyze` 통과
-- [ ] `flutter test` 통과
-- [ ] rules test 통과
-- [ ] web fallback 최소 시나리오 정상
-- [ ] 치명 보안 이슈 미해결 상태 없음
-- [ ] 모바일 실기 검증 재개 및 최소 증빙 확보
-
-## 13.2 배포 후 확인 항목
-
-- [ ] first-error 기록
-- [ ] 회귀 여부 확인
-- [ ] fallback 경로 정상 여부 확인
-- [ ] 실사용 피드백 수집
+## 18.4 First-Error 루프
+필수 기록 필드:
+- timestamp
+- device/browser/build
+- 재현 조건
+- 로그 참조
+- 스크린샷/영상 링크
 
 ---
 
-# 14. 현재 보류 항목
+# 19. Release Evidence 패키지 표준
 
-현재 기준 핵심 보류 항목은 없다.
+## 19.1 Evidence 필수 필드
+- Timestamp (KST)
+- Build/Release Version
+- Scenario ID
+- Command/Log Reference
+- Screenshot/Video Link
+- Result(PASS/FAIL)
 
-남은 블로커(승인 전 정리 필요):
+## 19.2 Evidence 저장 위치
+- 실행 체크: `docs/ops/release_checklist.md`
+- 절차/판정: `docs/release_runbook.md`
+- 기기 시나리오: `docs/ops/device_validation.md`
+- 사후 이슈: `docs/ops/post_deploy_runtime_issues.md`
 
-- Release checklist 최종 체크/서명
-- runbook evidence 패키지(시각/빌드/로그/미디어 링크) 완결
-- 최종 `APPROVED` 또는 `BLOCKED` 판정 기록
-
-원칙:
-
-- `device_validation.md`에 기록된 PASS는 인정한다.
-- 단, 배포 승인 문서가 완결되기 전에는 release approved를 선언하지 않는다.
-
----
-
-# 15. Final Success Criteria
-
-다음 조건을 모두 만족하면 현재 계획은 성공으로 판정한다.
-
-## 구조 / 품질
-
-- [ ] LiveCue 핵심 책임 경계가 유지된다
-- [ ] UI 레이어가 상태 소유권을 침범하지 않는다
-- [ ] 동일 버그 재발 가능성이 구조적으로 낮아진다
-- [ ] `flutter analyze` / `flutter test` / rules test 기준이 유지된다
-
-## 운영 기능
-
-- [ ] 운영자가 실제 예배 운영 기능을 사용할 수 있다
-- [ ] 팀 / 프로젝트 / LiveCue 운영 동선이 일관된다
-- [ ] setlist / cue / 곡 이동 기능이 안정적으로 동작한다
-
-## 협업 기능
-
-- [ ] shared layer / shared cue가 팀 단위로 안정적으로 동작한다
-- [ ] multi-user sync 충돌이 재현되지 않는다
-- [ ] 역할별 권한 정책이 코드/규칙/UI에서 일치한다
-
-## 배포 준비
-
-- [ ] production build / deploy / env / rules 기준이 정리된다
-- [ ] 배포 게이트를 통과할 수 있는 검증 근거가 확보된다
-
-## 실기 검증
-
-- [ ] iPad / iPhone / 필요 시 Android 태블릿 테스트를 완료한다
-- [ ] Apple Pencil / 공유 필기 / 장시간 테스트 기준을 충족한다
+## 19.3 승인 상태 표기 규칙
+- `READY FOR APPROVAL`: 게이트 통과 + 증빙 패키지 완결
+- `BLOCKED`: 게이트 실패 또는 증빙 누락
+- `DEPLOYED`: 실제 배포 실행 확인 후 표기
 
 ---
 
-# 16. 요약
+# 20. Architecture Risk Register
 
-현재 기준 요약:
+## 20.1 Large UI Integration Risk
+대상:
+- `live_cue_page.dart`
+- `team_home_page.dart`
+- `global_admin_page.dart`
 
-- SP-01 완료
-- SP-01A 완료
-- SP-02 완료
-- SP-03 완료
-- SP-04 구현 완료 / `device_validation.md` 기준 시나리오 PASS 문서 반영
-- SP-05-1 ~ SP-05-4 완료
-- SP-06 런타임 가드 강화 완료
-- SP-07 static gate PASS + device validation 문서 PASS
-- 최종 release 승인 판정은 증빙 패키지 정리 후 대기
+리스크:
+- UI 레이어로 상태/비즈니스 로직 재침투
 
-즉, 현재 상태는 다음으로 정리된다.
+완화:
+- 기능 단위 분리
+- 상태 소유권 정책 강제
+- 변경 후 검증 3종 + 회귀 체크
 
-**기능/안정화 구현은 완료되었고,  
-현재는 SP-07 릴리스 게이트 최종 승인 문서를 마감하는 단계다.**
+## 20.2 Firestore Path Coupling Risk
+리스크:
+- 경로 변경 시 광범위 영향
 
+완화:
+- 경로 헬퍼/중앙 accessor 유지
+- canonical 변경은 별도 승인
 
+## 20.3 Sync Ordering Drift Risk
+리스크:
+- 협업 단계에서 race/역전 재발
 
+완화:
+- generation/sequence 유지
+- stale emission drop 정책 유지
+- first-error 루프로 조기 감지
 
-## 14. SP-08 Operations & Observability
+## 20.4 Documentation Drift Risk
+리스크:
+- 문서와 코드 불일치로 잘못된 의사결정 유발
 
-Goal:
-Enable stable real-world operation by introducing operational monitoring and observability.
-
-Scope:
-- Admin monitoring panel
-- LiveCue session monitoring
-- Runtime guard metrics dashboard
-- Incident logging
-
-Implementation:
-- ops_metrics collection
-- runtime_guard_triggered metrics
-- session state viewer
-
-Definition of Done:
-- Admin can inspect active sessions
-- Runtime guard events are logged
-- Incident logs available for debugging
-
-
-## 15. SP-09 Music Metadata
-
-Goal:
-Support structured music metadata for each setlist item.
-
-Scope:
-- BPM (tempo)
-- Key
-- Time signature
-- Section markers
-
-Firestore Model:
-
-segmentA_setlist/{itemId}
-
-{
-  title
-  key
-  tempo
-  timeSignature
-  sectionMarkers
-}
-
-Definition of Done:
-- Metadata stored per setlist item
-- LiveCue renderer can read metadata
-- UI editor supports metadata input
-
-
-## 16. SP-10 Performance Assistance
-
-Goal:
-Provide live performance assistance features for musicians.
-
-Scope:
-- Tempo tap
-- Count-in
-- Cue timer
-- Auto scroll
-
-Implementation:
-- LiveCue renderer integrates tempo metadata
-- BPM-based cue timing
-- Count-in visual indicator
-
-Definition of Done:
-- Tempo tap calculates BPM
-- Count-in works
-- Cue timing visible in LiveCue
-
-
-## 17. SP-11 Collaboration Layer
-
-Goal:
-Enable multi-user collaboration within a project.
-
-Scope:
-- Shared notes editor
-- Presence indicator
-- Cue sync between devices
-- Comment system
-
-Implementation:
-- sharedNotes/main document
-- Presence tracking
-- Realtime collaboration UI
-
-Definition of Done:
-- Multiple users can edit notes
-- Changes sync across devices
-- Presence state visible
-
-
-## 18. SP-12 Production Deployment
-
-Goal:
-Prepare WorshipFlow for production deployment.
-
-Scope:
-- Firebase Hosting deployment
-- Production Firestore rules
-- CI/CD pipeline
-- Version tagging
-
-Implementation:
-- GitHub CI pipeline
-- release tagging
-- production environment setup
-
-Definition of Done:
-- Production deploy successful
-- Release version tagged
-- Production monitoring enabled
-
-# 19. Architecture Risk Register
-
-This section tracks architectural risks for WorshipFlow.
-
-These are not release blockers but must be monitored.
+완화:
+- SP 종료 시 plan/research/map 동기화
+- release gate 전 문서 감사 고정
 
 ---
 
-## Large UI Integration Files
+# 21. 다음 실행 순서 (실행형 로드맵)
 
-High risk files
+## 21.1 즉시 실행 (SP-07 마감)
+1. release checklist evidence 링크 완결
+2. runbook 승인 판정 기록
+3. post-deploy runtime 재발률 리포트 1차 발행
 
-- live_cue_page.dart
-- team_home_page.dart
-- global_admin_page.dart
+## 21.2 다음 착수 (SP-08)
+1. score preview 진입점 매트릭스 작성
+2. song resolution 실패 케이스 샘플링
+3. `songs_pending` 계약 초안 확정
 
-Risk
-
-UI integration layers may accumulate business logic over time.
-
-Examples
-
-- cue state interpretation
-- navigation state
-- runtime guards
-- collaboration UI
-
-Impact
-
-- regression risk
-- difficult debugging
-- unsafe automated edits
-
-Mitigation
-
-SP-08 ~ SP-10 동안 기능 단위 모듈 분리 진행
-
-Rules
-
-- never rewrite entire large files
-- extract feature modules
-- maintain engine ownership boundaries
+## 21.3 중기 (SP-09~SP-14)
+- SP-09: metadata 계약 + 입력/검증
+- SP-10: performance assist 기능 계층
+- SP-11: collaboration 계약/권한/동시성
+- SP-12: 운영 프로세스 성숙화
+- SP-13: score preview/resolution/discovery 확장
+- SP-14: community contribution/moderation pipeline
 
 ---
 
-## Firestore Path Coupling
+# 22. 최종 성공 기준
 
-Risk
+## 22.1 구조/품질
+- [ ] 상태 소유권 경계 유지
+- [ ] async safety 위반 없음
+- [ ] 정적 검증 3종 지속 PASS
 
-Client logic tightly coupled to Firestore path structure.
+## 22.2 운영 기능
+- [ ] 운영자 동선 일관성
+- [ ] setlist/cue 흐름 안정성
+- [ ] LiveCue 진입/동기화 신뢰성
 
-Impact
+## 22.3 운영 안정성
+- [ ] first-error 루프 작동
+- [ ] 주요 runtime issue 재발률 감소
 
-Future schema changes may break multiple features.
+## 22.4 릴리스 준비
+- [ ] SP-07 증빙 패키지 완결
+- [ ] 승인 판정 기록 완료
+- [ ] 배포 후 회귀 루프 시작
 
-Mitigation
-
-Introduce centralized path helpers.
-
----
-
-## Sync Ordering Drift
-
-Risk
-
-Future collaboration features may introduce ordering race conditions.
-
-Mitigation
-
-Maintain
-
-- generation tokens
-- syncRevision guards
-- stale event filtering
+## 22.5 확장 준비
+- [ ] SP-08 착수 조건 충족
+- [ ] SP-09~SP-14 실행 전 계약/리스크 사전 정렬
 
 ---
 
-# End of Plan
+# 23. 요약
+
+현재 WorshipFlow는:
+- SP-01~SP-06 핵심 구현/안정화가 완료된 상태이며,
+- SP-07은 릴리스 증빙 패키지 마감과 최종 승인 기록이 남아 있다.
+
+이 문서는 이후 SP-08~SP-14 확장을
+동일 밀도의 Workstream/DoD/검증/리스크 체계로 이어가기 위한 상세 기준선이다.
