@@ -78,10 +78,52 @@ String _cueLabelFromItem(Map<String, dynamic> item, int fallbackOrder) {
   return fallbackOrder.toString();
 }
 
+String _displayOrderLabelFromItem(
+  Map<String, dynamic> item,
+  int fallbackOrder,
+) {
+  final order = item['order'];
+  if (order is num) return order.toInt().toString();
+  return fallbackOrder.toString();
+}
+
 String _titleFromItem(Map<String, dynamic> item) {
   return (item['displayTitle'] ?? item['freeTextTitle'] ?? '곡')
       .toString()
       .trim();
+}
+
+String _sanitizeLegacyDisplayTitle(
+  String rawTitle, {
+  String? normalizedKeyText,
+}) {
+  final title = rawTitle.trim().replaceAll(RegExp(r'\s+'), ' ');
+  if (title.isEmpty) return '';
+  final normalizedKey = normalizedKeyText?.trim() ?? '';
+  if (normalizedKey.isEmpty) return title;
+
+  final withKeyPattern = RegExp(
+    r'^(?<label>\d+(?:-\d+)?)(?:[.)])?\s+(?<key>[A-G](?:#|b)?(?:\s*(?:-|/|→)\s*[A-G](?:#|b)?)*)\s+(?<title>.+)$',
+    caseSensitive: false,
+  );
+  final withKeyMatch = withKeyPattern.firstMatch(title);
+  if (withKeyMatch != null) {
+    final prefixedKey = withKeyMatch.namedGroup('key')?.trim() ?? '';
+    if (prefixedKey.isNotEmpty &&
+        normalizeKeyText(prefixedKey) == normalizeKeyText(normalizedKey)) {
+      final sanitized = withKeyMatch.namedGroup('title')?.trim() ?? '';
+      if (sanitized.isNotEmpty) return sanitized;
+    }
+  }
+
+  return title;
+}
+
+String _titleForDisplayFromItem(Map<String, dynamic> item) {
+  final title = _titleFromItem(item);
+  final key = _keyFromItem(item);
+  final sanitized = _sanitizeLegacyDisplayTitle(title, normalizedKeyText: key);
+  return sanitized.isEmpty ? '곡' : sanitized;
 }
 
 String? _keyFromItem(Map<String, dynamic> item) {
@@ -1104,11 +1146,14 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
                                           const SizedBox(height: 8),
                                       itemBuilder: (context, index) {
                                         final data = items[index].data();
-                                        final label = _cueLabelFromItem(
+                                        final label =
+                                            _displayOrderLabelFromItem(
+                                              data,
+                                              index + 1,
+                                            );
+                                        final title = _titleForDisplayFromItem(
                                           data,
-                                          index + 1,
                                         );
-                                        final title = _titleFromItem(data);
                                         final key = _keyFromItem(data);
                                         final line = _lineText(
                                           label: label,

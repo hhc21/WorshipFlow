@@ -551,6 +551,10 @@
 ## 10.6 SP-07 잔여 리스크
 - 문서 PASS와 운영 로그 증빙 간 링크 누락 가능성
 - post-deploy runtime issue 재발 여부에 따른 승인 판정 변경 가능성
+- LiveCue 초기 attach/re-entry 타이밍 불안정 가능성
+  - auth-ready 시점, first snapshot 수신 시점, watchdog 시작 시점, fullscreen/operator 전환 타이밍에 따라 first-entry 지연/재시도 필요 상황이 재현될 수 있음
+- legacy setlist 항목의 canonical field 오염 가능성
+  - `songId/title/key/cueLabel/displayTitle` 혼재 데이터에서 display 문자열이 해석 경로에 개입해 project/LiveCue 해상도 불일치가 재발할 수 있음
 
 ---
 
@@ -1083,12 +1087,13 @@ DoD:
 
 ---
 
-# 16. SP-13 Score System Expansion (상세)
+# 16. SP-13 Score Canonicalization & Resolution Layer (상세)
 
 상태: 예정
 
 ## 16.1 Goal
-Expand the WorshipFlow score system to support consistent preview, stable score resolution, and scalable score discovery.
+Establish the canonical score identity and resolution layer so preview consistency, stable lookup, and scalable discovery are guaranteed across all consumers.
+SP-13 acts as the data/resolution foundation that SP-14 (community contribution pipeline) must rely on.
 
 ## 16.2 Problem
 Current score handling has several limitations:
@@ -1107,6 +1112,7 @@ SP-13 introduces:
 2. Stable score resolution pipeline
 3. Score preview consistency across all UI entry points
 4. Search token indexing for song discovery
+5. Canonical score identity contract and lookup-source rules
 
 비범위:
 - LiveCue 엔진 ownership 구조 변경
@@ -1127,17 +1133,41 @@ Preview must render consistently in:
 - admin score library
 
 ## 16.5 Score Resolution Pipeline
+Resolution must always run after sanitization.
+
 Lookup priority order:
-1. `songId` direct match
-2. `teams/{teamId}/songRefs` mapping
-3. normalized title search
-4. `searchTokens` fallback
+1. `songId`
+2. `teams/{teamId}/songRefs`
+3. `canonicalTitle + canonicalKey`
+4. `aliases`
+5. `searchTokens`
 
 Normalization rules:
 - remove decorated display text
 - normalize whitespace
 - normalize key values
 - support legacy setlist entries
+
+### Canonical Score Identity
+Canonical fields:
+- `songId` (primary identity)
+- `canonicalTitle`
+- `canonicalKey`
+- `aliases[]`
+- `searchTokens[]`
+- `displayTitle` (render-only)
+
+Explicit rule:
+- `displayTitle` and `cueLabel` must NOT be used as lookup source-of-truth fields.
+- alias collision은 반드시 동일한 canonical `songId`로 수렴해야 하며, 표기 변형(예: `Way Maker` / `Waymaker` / `Way maker`)이 별도 canonical identity를 만들면 안 된다.
+
+### Legacy Compatibility Strategy
+- sanitize decorated strings before resolution
+- support on-read sanitization
+- optional on-write repair
+- gradual backfill for missing `songId`
+- maintain compatibility with existing project documents
+- no forced full migration
 
 목표:
 - “score not found” 오류 감소
@@ -1149,6 +1179,11 @@ Flutter UI:
 - `lib/features/songs/song_detail_page.dart`
 - project score preview entry points
 - LiveCue preview entry points
+- preview consumers must consume the same resolver output:
+  - admin library preview
+  - user library preview
+  - project preview
+  - LiveCue preview
 
 Firestore:
 - `songs` collection
@@ -1158,10 +1193,12 @@ Firestore:
 ### WS-01 Unified In-App Preview
 - 인앱 기본 프리뷰(새 탭 강제 제거)
 - 진입점별 UI/동작 일관성 보장
+- 모든 preview consumer가 동일 resolver output을 사용하도록 정렬
 
 ### WS-02 Resolution Stability
-- 4단계 해석 파이프라인 고정
+- canonical identity 기반 5단계 해석 파이프라인 고정
 - legacy 데이터 fallback 안정화
+- displayText/cueLabel 비권위 원칙 적용 및 검증
 
 ### WS-03 Discovery Indexing
 - `searchTokens` 생성/갱신 정책
@@ -1170,14 +1207,17 @@ Firestore:
 ### WS-04 Regression Safety
 - 기존 project/LiveCue 동선 회귀 방지
 - 오류 메시지 구체화
+- on-read sanitize / optional on-write repair / gradual backfill 회귀 검증
 
 ## 16.8 Definition of Done
 SP-13 완료 조건:
 - [ ] score preview opens in-app by default
 - [ ] preview behavior is consistent across all entry points
+- [ ] canonical score identity contract is defined and enforced
 - [ ] LiveCue score resolution is stable
 - [ ] legacy setlist items resolve correctly
 - [ ] search token indexing improves song discovery
+- [ ] SP-14가 SP-13 canonical identity/resolution 규칙을 전제로 설계되도록 기준선 연결
 
 ## 16.9 Verification
 Required checks:
@@ -1185,6 +1225,8 @@ Required checks:
 - [ ] `flutter test --reporter=compact` PASS
 - [ ] `bash scripts/ci/test_rules.sh` PASS
 - [ ] manual preview verification
+- [ ] canonical resolver validation (`songId -> songRefs -> canonicalTitle+canonicalKey -> aliases -> searchTokens`)
+- [ ] `displayTitle`/`cueLabel`이 lookup source-of-truth로 사용되지 않는지 회귀 검증
 
 ---
 
@@ -1193,7 +1235,8 @@ Required checks:
 상태: 예정
 
 ## 17.1 Goal
-Enable scalable song database growth through community contribution with moderation and canonical database integration.
+Define a quality-gated ingestion pipeline for community-contributed scores, with moderation and canonical database integration.
+SP-14는 direct insert 단계가 아니라 controlled ingestion 단계이며, canonical identity/resolution은 SP-13 규칙을 그대로 의존한다.
 
 ## 17.2 Problem
 현재 곡 DB는 관리자 업로드 의존도가 높아 다음 문제가 있다:
@@ -1204,45 +1247,64 @@ Enable scalable song database growth through community contribution with moderat
 
 ## 17.3 Contribution Flow
 Pipeline model:
-`User -> Upload -> Moderation -> Global DB`
+`User Upload -> Pending Storage -> Automated Validation -> Moderation Review -> Canonical Resolution -> Global Score DB`
 
 Steps:
 1. user uploads song score
-2. submission stored in pending collection
-3. admin reviews submission
-4. approved songs are inserted into canonical DB
+2. submission stored in pending collection (`songs_pending`)
+3. automated validation runs before moderation
+4. moderators review validated submissions
+5. canonical resolution is applied using SP-13 rules
+6. only approved items are inserted into canonical DB
 
 ## 17.4 Firestore Data Model
 Canonical song database:
 - `songs/{songId}`
 
-Pending submissions:
+Staging submissions (non-canonical):
 - `songs_pending/{submissionId}`
 
-Submission metadata:
-- Required:
-  - `title`
-  - `key`
-  - `fileUrl`
-  - `uploaderUid`
-  - `createdAt`
-- Optional:
-  - `artist`
-  - `bpm`
-  - `tags`
-  - `category`
-  - `aliases`
+Pending staging fields:
+- `uploaderId`
+- `titleRaw`
+- `keyRaw`
+- `sourceLink`
+- `uploadTimestamp`
+- `validationStatus`
+- `moderationStatus`
+
+Optional staging metadata:
+- `artist`
+- `bpm`
+- `tags`
+- `category`
+- `aliases`
+
+규칙:
+- `songs_pending` 레코드는 raw/staging 데이터이며 canonical score로 취급하지 않는다.
 
 ## 17.5 Moderation Actions
 Administrators can:
 - approve submission
+- link to existing canonical song
 - reject submission
 - request edit
 - merge duplicate songs
 
 Policy:
+- moderation 대상은 automated validation을 통과한 항목으로 제한한다.
 - approved songs are written into `songs/{songId}`
 - rejected submissions remain in moderation logs
+- canonical insertion rules:
+  - canonical `songId` 생성
+  - title/key 정규화
+  - 필요 시 aliases 연결
+  - `searchTokens` 갱신
+  - uploader attribution 메타데이터 보존
+- duplicate/alias handling:
+  - 기존 `songId`에 alias로 연결
+  - alternate key/version으로 연결
+  - 중복 제출로 판단 시 reject
 
 ## 17.6 Database Growth Strategy
 Expected benefits:
@@ -1257,32 +1319,48 @@ The system must ensure:
 - duplicate detection
 - metadata normalization
 - compatibility with existing projects
+- user upload는 pending/moderation 파이프라인을 우회해 canonical library를 직접 수정할 수 없다.
+- SP-14는 SP-13의 canonical identity/resolution/sanitization 규칙을 재사용하며, 별도 규칙을 재구현하지 않는다.
+- pending submission은 validation/moderation 과정에서 기존 canonical `songId`와 매칭될 수 있지만, `matched`는 `approved`를 의미하지 않으며 명시적 moderation approval 없이는 canonical 삽입/갱신이 불가하다.
 
 Legacy projects must continue to work without forced schema migration.
 
 ## 17.8 Workstreams
 ### WS-01 Submission Intake
-- 사용자 업로드 입력/검증
-- pending 저장 표준화
+- 사용자 업로드 입력 수집
+- raw payload를 `songs_pending`에 staging 저장
+
+### WS-01A Automated Validation Stage
+- canonical title normalization
+- key normalization
+- duplicate detection against canonical library
+- resolution attempt via SP-13 resolver
+- metadata completeness check
+- invalid submissions는 pending 상태 유지(`validationStatus=failed`)
 
 ### WS-02 Moderation Console
 - approve/reject/request edit/merge duplicate 처리
 - moderation audit log 유지
+- `validationStatus=passed` 항목 우선 검토
 
 ### WS-03 Canonical Integration
-- 승인 항목의 `songs/{songId}` 승격
-- 기존 song 중복/충돌 처리
+- moderation-approved 항목만 `songs/{songId}` 승격
+- canonical insertion rule(정규화/aliases/searchTokens/attribution) 적용
+- 기존 song 중복/충돌 처리(alias link / alternate key / reject)
 
 ### WS-04 Compatibility Guard
 - 기존 LiveCue/project 흐름 무중단 보장
 - legacy setlist 호환성 검증
+- SP-13 resolver output과 일관성 검증
 
 ## 17.9 Definition of Done
 SP-14 완료 조건:
 - [ ] users can submit songs
 - [ ] submissions are stored in `songs_pending`
-- [ ] admins can approve or reject submissions
+- [ ] automated validation stage runs before moderation
+- [ ] admins can approve/reject/link/request-edit submissions
 - [ ] approved songs appear in the global `songs` collection
+- [ ] canonical insertion rules(songId/title-key normalization/aliases/searchTokens/attribution) 적용
 - [ ] existing LiveCue flows continue to function without breaking changes
 
 ## 17.10 Verification
@@ -1290,7 +1368,9 @@ Required checks:
 - [ ] `flutter analyze` PASS
 - [ ] `flutter test --reporter=compact` PASS
 - [ ] `bash scripts/ci/test_rules.sh` PASS
-- [ ] submission -> approval -> global DB flow verified
+- [ ] submission -> validation -> moderation -> canonical DB flow verified
+- [ ] invalid submission이 pending에 잔류하는지 검증
+- [ ] bypass 시도 시 canonical write가 차단되는지 검증
 
 ---
 
@@ -1318,6 +1398,18 @@ Required checks:
 - 재현 조건
 - 로그 참조
 - 스크린샷/영상 링크
+
+## 18.5 Post-SP-07 고위험 안정화 검증
+우선 검증 대상:
+- LiveCue initial attach/re-entry timing
+  - attach state machine 단계별 로그(attach start/auth-ready/first snapshot/watchdog start-watchdog clear) 관측
+  - first-snapshot timeout metric 수집 및 브라우저/네트워크 조건별 재진입 회귀 테스트
+- legacy setlist canonical hygiene
+  - display-text 비권위(non-authoritative) 원칙 검증
+  - sanitize/backfill 전략이 project/LiveCue/library 공통 해상도에서 일관 동작하는지 검증
+- 대형 통합 UI 파일 회귀 핫스팟
+  - 한 번에 한 핫스팟만 수정(미니 패치)
+  - 수정 축(preview/reorder/retry/admin-path)을 분리해 교차 회귀 여부를 시나리오별로 검증
 
 ---
 
@@ -1349,16 +1441,23 @@ Required checks:
 ## 20.1 Large UI Integration Risk
 대상:
 - `live_cue_page.dart`
+- `segment_a_page.dart`
 - `team_home_page.dart`
 - `global_admin_page.dart`
 
 리스크:
 - UI 레이어로 상태/비즈니스 로직 재침투
+- 통합 파일 간 교차 회귀
+  - preview 수정 후 reorder 회귀
+  - retry 수정 후 fullscreen 회귀
+  - admin 경로 수정 후 user 경로 회귀
+  - loading/error/empty 상태의 독립 회귀
 
 완화:
 - 기능 단위 분리
 - 상태 소유권 정책 강제
 - 변경 후 검증 3종 + 회귀 체크
+- 최소 패치 원칙 유지, 전면 재작성 금지, 한 번에 한 hotspot만 수정
 
 ## 20.2 Firestore Path Coupling Risk
 리스크:
@@ -1385,6 +1484,26 @@ Required checks:
 - SP 종료 시 plan/research/map 동기화
 - release gate 전 문서 감사 고정
 
+## 20.5 LiveCue Initial Attach/Re-entry Timing Risk
+리스크:
+- first-entry attach가 auth readiness/first snapshot/watchdog 타이밍에 민감하여 초기 진입 지연 또는 재시도 의존이 재발할 수 있음
+- operator/fullscreen 전환 및 네트워크 변동 시 current/next 반영 지연이 발생할 수 있음
+
+완화:
+- attach state machine 명시화(상태 전이/실패 전이/재시도 전이)
+- auth-ready gating 기준 고정
+- first-snapshot timeout metric 및 re-entry regression 시나리오 상시 점검
+
+## 20.6 Legacy Setlist Canonical Contamination Risk
+리스크:
+- legacy 항목에서 `songId/title/key/cueLabel/displayTitle`가 혼재되어 display 문자열이 canonical 해석을 오염시킬 수 있음
+- library에서는 열리지만 project/LiveCue에서는 실패하는 간헐 불일치가 발생할 수 있음
+
+완화:
+- canonical field 우선순위 강제(`songId -> songRefs -> normalized title -> searchTokens`)
+- display-text non-authoritative 원칙 고정
+- sanitize/backfill 전략과 legacy compatibility validation을 릴리즈 전 회귀 체크에 포함
+
 ---
 
 # 21. 다음 실행 순서 (실행형 로드맵)
@@ -1398,6 +1517,8 @@ Required checks:
 1. score preview 진입점 매트릭스 작성
 2. song resolution 실패 케이스 샘플링
 3. `songs_pending` 계약 초안 확정
+4. LiveCue attach state machine 초안 정리(auth-ready gating/first-snapshot timeout metric 포함)
+5. legacy setlist sanitize/backfill 검증 케이스 정리
 
 ## 21.3 중기 (SP-09~SP-14)
 - SP-09: metadata 계약 + 입력/검증
@@ -1406,6 +1527,11 @@ Required checks:
 - SP-12: 운영 프로세스 성숙화
 - SP-13: score preview/resolution/discovery 확장
 - SP-14: community contribution/moderation pipeline
+
+## 21.4 리스크 기반 후속 안정화 우선순위
+1. LiveCue initial attach/re-entry timing hardening
+2. legacy setlist canonical hygiene(sanitize/backfill) hardening
+3. 대형 통합 UI 파일 hotspot별 분할 안정화(한 사이클 한 영역 원칙)
 
 ---
 

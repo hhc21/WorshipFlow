@@ -779,6 +779,52 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     return unique.toList();
   }
 
+  String _displayOrderLabelFromItem(
+    Map<String, dynamic> item, {
+    required int fallbackOrder,
+  }) {
+    final order = item['order'];
+    if (order is num) return order.toInt().toString();
+    return fallbackOrder.toString();
+  }
+
+  String _sanitizeLegacyDisplayTitle(
+    String rawTitle, {
+    String? normalizedKeyText,
+  }) {
+    final title = rawTitle.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (title.isEmpty) return '';
+    final normalizedKey = normalizedKeyText?.trim() ?? '';
+    if (normalizedKey.isEmpty) return title;
+
+    final withKeyPattern = RegExp(
+      r'^(?<label>\d+(?:-\d+)?)(?:[.)])?\s+(?<key>[A-G](?:#|b)?(?:\s*(?:-|/|→)\s*[A-G](?:#|b)?)*)\s+(?<title>.+)$',
+      caseSensitive: false,
+    );
+    final withKeyMatch = withKeyPattern.firstMatch(title);
+    if (withKeyMatch != null) {
+      final prefixedKey = withKeyMatch.namedGroup('key')?.trim() ?? '';
+      if (prefixedKey.isNotEmpty &&
+          normalizeKeyText(prefixedKey) == normalizeKeyText(normalizedKey)) {
+        final sanitized = withKeyMatch.namedGroup('title')?.trim() ?? '';
+        if (sanitized.isNotEmpty) return sanitized;
+      }
+    }
+
+    return title;
+  }
+
+  String _displayTitleFromSetlistItem(Map<String, dynamic> item) {
+    final rawTitle = (item['displayTitle'] ?? item['freeTextTitle'] ?? '곡')
+        .toString();
+    final normalizedKey = _normalizedKey(item['keyText']);
+    final sanitized = _sanitizeLegacyDisplayTitle(
+      rawTitle,
+      normalizedKeyText: normalizedKey.isEmpty ? null : normalizedKey,
+    );
+    return sanitized.isEmpty ? '곡' : sanitized;
+  }
+
   List<String> _songTitleCandidatesForLookup(String rawTitle) {
     final candidates = <String>{};
     final seed = rawTitle.trim();
@@ -813,9 +859,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     var songId = data['songId']?.toString().trim();
 
     if (songId == null || songId.isEmpty) {
-      final rawTitle = (data['displayTitle'] ?? data['freeTextTitle'] ?? '')
-          .toString()
-          .trim();
+      final rawTitle = _displayTitleFromSetlistItem(data);
       if (rawTitle.isEmpty) {
         if (!context.mounted) return;
         ScaffoldMessenger.of(
@@ -911,10 +955,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
   ) async {
     if (!widget.canEdit) return;
     final data = itemDoc.data();
-    var draftTitle =
-        data['displayTitle']?.toString() ??
-        data['freeTextTitle']?.toString() ??
-        '';
+    var draftTitle = _displayTitleFromSetlistItem(data);
     var draftKey = data['keyText']?.toString() ?? '';
     var draftMemo = data['memoShared']?.toString() ?? '';
     var draftCueLabel = (data['cueLabel'] ?? data['order'] ?? '').toString();
@@ -1245,14 +1286,11 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                   itemBuilder: (context, index) {
                     final data = items[index].data();
                     final key = data['keyText']?.toString();
-                    final cueLabel =
-                        data['cueLabel']?.toString().trim().isNotEmpty == true
-                        ? data['cueLabel'].toString()
-                        : (data['order']?.toString() ?? '${index + 1}');
-                    final title =
-                        data['displayTitle']?.toString() ??
-                        data['freeTextTitle']?.toString() ??
-                        '곡';
+                    final cueLabel = _displayOrderLabelFromItem(
+                      data,
+                      fallbackOrder: index + 1,
+                    );
+                    final title = _displayTitleFromSetlistItem(data);
                     final memo = data['memoShared']?.toString();
                     final referenceLinks =
                         ((data['referenceLinks'] as List?) ?? const [])
