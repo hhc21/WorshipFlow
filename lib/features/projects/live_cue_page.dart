@@ -186,94 +186,41 @@ void _traceLiveCueSync(
 
 Future<SongCandidate?> _matchSongAutomatically(
   FirebaseFirestore firestore,
-  String title,
-) async {
-  final candidates = await findSongCandidates(firestore, title);
-  if (candidates.isEmpty) return null;
-  final normalizedTitle = normalizeQuery(title);
-  for (final candidate in candidates) {
-    if (normalizeQuery(candidate.title) == normalizedTitle) return candidate;
-  }
-  return candidates.first;
-}
-
-List<String> _candidateTitlesFromFallback(String? fallbackTitle) {
-  final seed = fallbackTitle?.trim() ?? '';
-  if (seed.isEmpty) return const [];
-
-  final titles = <String>{seed};
-  final parsedSeed = parseSongInput(seed).title.trim();
-  if (parsedSeed.isNotEmpty) {
-    titles.add(parsedSeed);
-  }
-
-  final withoutCueLabel = seed
-      .replaceFirst(RegExp(r'^\s*\d+(?:-\d+)?\s+'), '')
-      .trim();
-  if (withoutCueLabel.isNotEmpty) {
-    titles.add(withoutCueLabel);
-    final parsedWithoutLabel = parseSongInput(withoutCueLabel).title.trim();
-    if (parsedWithoutLabel.isNotEmpty) {
-      titles.add(parsedWithoutLabel);
-    }
-  }
-
-  return titles.toList();
+  String title, {
+  String? keyText,
+  String? teamId,
+}) async {
+  return resolvePrimarySongCandidate(
+    firestore,
+    songId: null,
+    rawTitle: title,
+    keyText: keyText,
+    teamId: teamId,
+  );
 }
 
 Future<List<String>> _songIdCandidatesForPreview(
   FirebaseFirestore firestore,
   String? teamId,
   String? preferredSongId,
+  String? keyText,
   String? fallbackTitle,
 ) async {
-  final candidateIds = <String>[];
-  final seen = <String>{};
-  void addId(String? raw) {
-    final value = raw?.trim() ?? '';
-    if (value.isEmpty) return;
-    if (seen.add(value)) {
-      candidateIds.add(value);
-    }
-  }
-
-  addId(preferredSongId);
-
-  final titleCandidates = _candidateTitlesFromFallback(fallbackTitle);
-  for (final title in titleCandidates) {
-    try {
-      final candidates = await findSongCandidates(firestore, title);
-      for (final candidate in candidates) {
-        addId(candidate.id);
-      }
-    } catch (_) {
-      // Ignore and keep already resolved candidates.
-    }
-
-    final safeTeamId = teamId?.trim() ?? '';
-    if (safeTeamId.isNotEmpty) {
-      try {
-        final refCandidates = await findTeamSongRefCandidates(
-          firestore,
-          teamId: safeTeamId,
-          title: title,
-        );
-        for (final songId in refCandidates) {
-          addId(songId);
-        }
-      } catch (_) {
-        // Continue with available candidates.
-      }
-    }
-  }
-
-  return candidateIds;
+  final result = await resolveSongLookup(
+    firestore,
+    songId: preferredSongId,
+    rawTitle: fallbackTitle,
+    keyText: keyText,
+    teamId: teamId,
+  );
+  return result.songIds;
 }
 
 Future<Map<String, dynamic>> _cueFieldsFromSetlist(
   FirebaseFirestore firestore,
   Map<String, dynamic> setlistItem, {
   required String prefix,
+  String? teamId,
 }) async {
   String? songId = setlistItem['songId']?.toString().trim();
   String displayTitle =
@@ -294,7 +241,12 @@ Future<Map<String, dynamic>> _cueFieldsFromSetlist(
       : cueLabel;
 
   if ((songId == null || songId.isEmpty) && displayTitle.isNotEmpty) {
-    final matched = await _matchSongAutomatically(firestore, displayTitle);
+    final matched = await _matchSongAutomatically(
+      firestore,
+      displayTitle,
+      keyText: keyText,
+      teamId: teamId,
+    );
     if (matched != null) {
       songId = matched.id;
       displayTitle = matched.title;
@@ -324,6 +276,7 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
     firestore,
     teamId,
     songId,
+    keyText,
     fallbackTitle,
   );
   if (songIdCandidates.isEmpty) return null;
@@ -597,6 +550,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
           firestore,
           items.first.data(),
           prefix: 'current',
+          teamId: widget.teamId,
         ),
       };
       if (items.length > 1) {
@@ -605,6 +559,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
             firestore,
             items[1].data(),
             prefix: 'next',
+            teamId: widget.teamId,
           ),
         );
       } else {
@@ -642,6 +597,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
           firestore,
           items[index].data(),
           prefix: 'current',
+          teamId: widget.teamId,
         ),
       };
       if (index + 1 < items.length) {
@@ -650,6 +606,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
             firestore,
             items[index + 1].data(),
             prefix: 'next',
+            teamId: widget.teamId,
           ),
         );
       } else {
@@ -1973,6 +1930,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
           firestore,
           items.first.data(),
           prefix: 'current',
+          teamId: widget.teamId,
         ),
       };
       if (items.length > 1) {
@@ -1981,6 +1939,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
             firestore,
             items[1].data(),
             prefix: 'next',
+            teamId: widget.teamId,
           ),
         );
       } else {
@@ -2018,6 +1977,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         firestore,
         items[index].data(),
         prefix: 'current',
+        teamId: widget.teamId,
       ),
     };
     if (index + 1 < items.length) {
@@ -2026,6 +1986,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
           firestore,
           items[index + 1].data(),
           prefix: 'next',
+          teamId: widget.teamId,
         ),
       );
     } else {

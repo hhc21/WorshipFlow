@@ -58,7 +58,13 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
     final parsed = parseSongInput(raw);
 
     try {
-      final candidates = await findSongCandidates(firestore, parsed.title);
+      final candidates = await resolveSongCandidates(
+        firestore,
+        songId: null,
+        rawTitle: parsed.title,
+        keyText: parsed.keyText,
+        teamId: widget.teamId,
+      );
 
       if (!context.mounted) return;
 

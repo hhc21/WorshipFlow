@@ -13,6 +13,61 @@ class SongCandidate {
   const SongCandidate({required this.id, required this.title});
 }
 
+class SongResolutionCandidate {
+  final String id;
+  final String title;
+  final String source;
+
+  const SongResolutionCandidate({
+    required this.id,
+    required this.title,
+    required this.source,
+  });
+
+  SongCandidate toSongCandidate() => SongCandidate(id: id, title: title);
+}
+
+class SongResolutionResult {
+  final List<SongResolutionCandidate> candidates;
+
+  const SongResolutionResult(this.candidates);
+
+  SongResolutionCandidate? get primary =>
+      candidates.isEmpty ? null : candidates.first;
+
+  bool get isResolved => candidates.isNotEmpty;
+
+  List<String> get songIds =>
+      candidates.map((candidate) => candidate.id).toList();
+
+  List<SongCandidate> toSongCandidates() =>
+      candidates.map((candidate) => candidate.toSongCandidate()).toList();
+}
+
+SongCandidate? preferResolvedSongCandidate(
+  Iterable<SongCandidate> candidates,
+  String queryText,
+) {
+  final normalizedQuery = normalizeQuery(queryText);
+  if (normalizedQuery.isEmpty) {
+    for (final candidate in candidates) {
+      return candidate;
+    }
+    return null;
+  }
+
+  for (final candidate in candidates) {
+    if (normalizeQuery(candidate.title) == normalizedQuery) {
+      return candidate;
+    }
+  }
+
+  for (final candidate in candidates) {
+    return candidate;
+  }
+  return null;
+}
+
 const int _maxSongSearchCacheEntries = 256;
 const int _maxTeamSongRefCacheEntries = 256;
 
@@ -43,6 +98,76 @@ void _rememberTeamSongRefCache(String cacheKey, List<String> value) {
   }
 }
 
+@visibleForTesting
+void resetSongSearchCaches() {
+  _songCandidateCache.clear();
+  _songCandidateCacheOrder.clear();
+  _teamSongRefCache.clear();
+  _teamSongRefCacheOrder.clear();
+}
+
+String sanitizeSongLookupTitle(String rawTitle, {String? keyText}) {
+  final title = rawTitle.trim().replaceAll(RegExp(r'\s+'), ' ');
+  if (title.isEmpty) return '';
+
+  final normalizedKey = keyText?.trim().isEmpty ?? true
+      ? ''
+      : normalizeKeyText(keyText!.trim());
+  if (normalizedKey.isEmpty) return title;
+
+  final withKeyPattern = RegExp(
+    r'^(?<label>\d+(?:-\d+)?)(?:[.)])?\s+(?<key>[A-G](?:#|b)?(?:\s*(?:-|/|→)\s*[A-G](?:#|b)?)*)\s+(?<title>.+)$',
+    caseSensitive: false,
+  );
+  final withKeyMatch = withKeyPattern.firstMatch(title);
+  if (withKeyMatch != null) {
+    final prefixedKey = withKeyMatch.namedGroup('key')?.trim() ?? '';
+    if (prefixedKey.isNotEmpty &&
+        normalizeKeyText(prefixedKey) == normalizedKey) {
+      final sanitized = withKeyMatch.namedGroup('title')?.trim() ?? '';
+      if (sanitized.isNotEmpty) {
+        return sanitized;
+      }
+    }
+  }
+
+  return title;
+}
+
+List<String> buildSongLookupTitleCandidates(
+  String rawTitle, {
+  String? keyText,
+}) {
+  final seed = rawTitle.trim();
+  if (seed.isEmpty) return const <String>[];
+
+  final candidates = <String>{};
+
+  void addTitle(String value) {
+    final trimmed = value.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (trimmed.isNotEmpty) {
+      candidates.add(trimmed);
+    }
+  }
+
+  addTitle(seed);
+  addTitle(sanitizeSongLookupTitle(seed, keyText: keyText));
+
+  final withoutCueLabel = seed
+      .replaceFirst(RegExp(r'^\s*\d+(?:-\d+)?(?:[.)])?\s+'), '')
+      .trim();
+  addTitle(withoutCueLabel);
+  addTitle(sanitizeSongLookupTitle(withoutCueLabel, keyText: keyText));
+
+  for (final candidate in candidates.toList()) {
+    final parsed = parseSongInput(candidate).title.trim();
+    addTitle(parsed);
+    addTitle(sanitizeSongLookupTitle(parsed, keyText: keyText));
+  }
+
+  return candidates.toList();
+}
+
 List<SongCandidate> _toSongCandidates(
   List<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
 ) {
@@ -54,6 +179,145 @@ List<SongCandidate> _toSongCandidates(
         ),
       )
       .toList();
+}
+
+List<SongResolutionCandidate> _preferKeyMatches(
+  Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  String? normalizedKey,
+  String source,
+) {
+  final all = docs
+      .map(
+        (doc) => SongResolutionCandidate(
+          id: doc.id,
+          title: (doc.data()['title'] ?? '').toString(),
+          source: source,
+        ),
+      )
+      .toList();
+  if (normalizedKey == null || normalizedKey.isEmpty) {
+    return all;
+  }
+
+  final withKey = docs
+      .where((doc) {
+        final rawDefaultKey = doc.data()['defaultKey']?.toString().trim();
+        if (rawDefaultKey == null || rawDefaultKey.isEmpty) {
+          return false;
+        }
+        return normalizeKeyText(rawDefaultKey) == normalizedKey;
+      })
+      .map(
+        (doc) => SongResolutionCandidate(
+          id: doc.id,
+          title: (doc.data()['title'] ?? '').toString(),
+          source: source,
+        ),
+      )
+      .toList();
+
+  return withKey.isNotEmpty ? withKey : all;
+}
+
+Future<List<SongResolutionCandidate>> _querySongsByExactTitle(
+  FirebaseFirestore firestore,
+  String title, {
+  String? normalizedKey,
+}) async {
+  final query = await firestore
+      .collection('songs')
+      .where('title', isEqualTo: title)
+      .limit(10)
+      .get();
+  return _preferKeyMatches(query.docs, normalizedKey, 'canonical_title_key');
+}
+
+Future<List<SongResolutionCandidate>> _querySongsByAlias(
+  FirebaseFirestore firestore,
+  String title, {
+  String? normalizedKey,
+}) async {
+  final query = await firestore
+      .collection('songs')
+      .where('aliases', arrayContains: title)
+      .limit(10)
+      .get();
+  return _preferKeyMatches(query.docs, normalizedKey, 'alias');
+}
+
+Future<List<SongResolutionCandidate>> _querySongsByNormalizedToken(
+  FirebaseFirestore firestore,
+  String normalizedTitle, {
+  String? normalizedKey,
+}) async {
+  final tokenQuery = await firestore
+      .collection('songs')
+      .where('searchTokens', arrayContains: normalizedTitle)
+      .limit(10)
+      .get();
+  final tokenMatches = _preferKeyMatches(
+    tokenQuery.docs,
+    normalizedKey,
+    'normalized_token',
+  );
+  if (tokenMatches.isNotEmpty) {
+    return tokenMatches;
+  }
+
+  final matches = <SongResolutionCandidate>[];
+  QueryDocumentSnapshot<Map<String, dynamic>>? cursor;
+  var scanned = 0;
+  const pageSize = 200;
+  const maxScan = 2000;
+
+  while (scanned < maxScan) {
+    var query = firestore
+        .collection('songs')
+        .orderBy(FieldPath.documentId)
+        .limit(pageSize);
+    if (cursor != null) {
+      query = query.startAfterDocument(cursor);
+    }
+
+    final page = await query.get();
+    if (page.docs.isEmpty) break;
+
+    scanned += page.docs.length;
+    cursor = page.docs.last;
+    final pageMatches = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+    for (final doc in page.docs) {
+      final title = (doc.data()['title'] ?? '').toString();
+      if (normalizeQuery(title) == normalizedTitle) {
+        pageMatches.add(doc);
+        continue;
+      }
+      final aliases = (doc.data()['aliases'] as List?) ?? const [];
+      for (final alias in aliases) {
+        if (normalizeQuery(alias.toString()) == normalizedTitle) {
+          pageMatches.add(doc);
+          break;
+        }
+      }
+    }
+    if (pageMatches.isNotEmpty) {
+      matches.addAll(
+        _preferKeyMatches(pageMatches, normalizedKey, 'normalized_token'),
+      );
+      break;
+    }
+  }
+
+  if (scanned > 0) {
+    OpsMetrics.emit(
+      'song_search_broad_scan',
+      fields: <String, Object?>{
+        'query': normalizedTitle,
+        'scanned': scanned,
+        'matchCount': matches.length,
+      },
+    );
+  }
+  return matches;
 }
 
 Future<List<SongCandidate>> findSongCandidates(
@@ -156,6 +420,160 @@ Future<List<SongCandidate>> findSongCandidates(
   }
   _rememberSongCandidateCache(normalized, matches);
   return matches;
+}
+
+Future<SongResolutionResult> resolveSongLookup(
+  FirebaseFirestore firestore, {
+  required String? songId,
+  required String? rawTitle,
+  required String? keyText,
+  String? teamId,
+}) async {
+  final candidates = <SongResolutionCandidate>[];
+  final byId = <String, SongResolutionCandidate>{};
+
+  void addCandidate(SongResolutionCandidate candidate) {
+    final existing = byId[candidate.id];
+    if (existing == null) {
+      byId[candidate.id] = candidate;
+      candidates.add(candidate);
+      return;
+    }
+    if (existing.title.isEmpty && candidate.title.isNotEmpty) {
+      final updated = SongResolutionCandidate(
+        id: existing.id,
+        title: candidate.title,
+        source: existing.source,
+      );
+      byId[candidate.id] = updated;
+      final index = candidates.indexWhere((item) => item.id == candidate.id);
+      if (index >= 0) {
+        candidates[index] = updated;
+      }
+    }
+  }
+
+  final safeSongId = songId?.trim() ?? '';
+  final normalizedKey = keyText?.trim().isEmpty ?? true
+      ? null
+      : normalizeKeyText(keyText!.trim());
+  final titleCandidates = buildSongLookupTitleCandidates(
+    rawTitle?.trim() ?? '',
+    keyText: normalizedKey,
+  );
+
+  if (safeSongId.isNotEmpty) {
+    addCandidate(
+      SongResolutionCandidate(
+        id: safeSongId,
+        title: titleCandidates.isEmpty ? '' : titleCandidates.first,
+        source: 'song_id',
+      ),
+    );
+  }
+
+  final safeTeamId = teamId?.trim() ?? '';
+  if (safeTeamId.isNotEmpty) {
+    for (final title in titleCandidates) {
+      final teamMatches = await findTeamSongRefCandidates(
+        firestore,
+        teamId: safeTeamId,
+        title: title,
+      );
+      for (final id in teamMatches) {
+        addCandidate(
+          SongResolutionCandidate(
+            id: id,
+            title: title,
+            source: 'team_song_ref',
+          ),
+        );
+      }
+      if (candidates.isNotEmpty && safeSongId.isEmpty) {
+        break;
+      }
+    }
+  }
+
+  for (final title in titleCandidates) {
+    final exactMatches = await _querySongsByExactTitle(
+      firestore,
+      title,
+      normalizedKey: normalizedKey,
+    );
+    for (final candidate in exactMatches) {
+      addCandidate(candidate);
+    }
+    if (exactMatches.isNotEmpty) {
+      break;
+    }
+  }
+
+  for (final title in titleCandidates) {
+    final aliasMatches = await _querySongsByAlias(
+      firestore,
+      title,
+      normalizedKey: normalizedKey,
+    );
+    for (final candidate in aliasMatches) {
+      addCandidate(candidate);
+    }
+    if (aliasMatches.isNotEmpty) {
+      break;
+    }
+  }
+
+  for (final title in titleCandidates) {
+    final normalizedTitle = normalizeQuery(title);
+    if (normalizedTitle.isEmpty) continue;
+    final tokenMatches = await _querySongsByNormalizedToken(
+      firestore,
+      normalizedTitle,
+      normalizedKey: normalizedKey,
+    );
+    for (final candidate in tokenMatches) {
+      addCandidate(candidate);
+    }
+    if (tokenMatches.isNotEmpty) {
+      break;
+    }
+  }
+
+  return SongResolutionResult(candidates);
+}
+
+Future<List<SongCandidate>> resolveSongCandidates(
+  FirebaseFirestore firestore, {
+  required String? songId,
+  required String? rawTitle,
+  required String? keyText,
+  String? teamId,
+}) async {
+  final result = await resolveSongLookup(
+    firestore,
+    songId: songId,
+    rawTitle: rawTitle,
+    keyText: keyText,
+    teamId: teamId,
+  );
+  return result.toSongCandidates();
+}
+
+Future<SongCandidate?> resolvePrimarySongCandidate(
+  FirebaseFirestore firestore, {
+  required String? songId,
+  required String? rawTitle,
+  required String? keyText,
+  String? teamId,
+}) async {
+  final candidates = await resolveSongCandidates(
+    firestore,
+    songId: songId,
+    rawTitle: rawTitle,
+    keyText: keyText,
+    teamId: teamId,
+  );
+  return preferResolvedSongCandidate(candidates, rawTitle ?? '');
 }
 
 Future<List<String>> findTeamSongRefCandidates(

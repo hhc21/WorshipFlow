@@ -120,15 +120,16 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
 
   Future<SongCandidate?> _matchSongAutomatically(
     FirebaseFirestore firestore,
-    String title,
-  ) async {
-    final candidates = await findSongCandidates(firestore, title);
-    if (candidates.isEmpty) return null;
-    final normalizedTitle = normalizeQuery(title);
-    for (final candidate in candidates) {
-      if (normalizeQuery(candidate.title) == normalizedTitle) return candidate;
-    }
-    return candidates.first;
+    String title, {
+    String? keyText,
+  }) async {
+    return resolvePrimarySongCandidate(
+      firestore,
+      songId: null,
+      rawTitle: title,
+      keyText: keyText,
+      teamId: widget.teamId,
+    );
   }
 
   bool _isSameSong(
@@ -182,7 +183,11 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         : rawCueLabel;
 
     if ((songId == null || songId.isEmpty) && displayTitle.isNotEmpty) {
-      final matched = await _matchSongAutomatically(firestore, displayTitle);
+      final matched = await _matchSongAutomatically(
+        firestore,
+        displayTitle,
+        keyText: keyText,
+      );
       if (matched != null) {
         songId = matched.id;
         displayTitle = matched.title;
@@ -535,7 +540,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     }
 
     try {
-      final candidates = await findSongCandidates(firestore, parsed.title);
+      final candidates = await resolveSongCandidates(
+        firestore,
+        songId: null,
+        rawTitle: parsed.title,
+        keyText: parsed.keyText,
+        teamId: widget.teamId,
+      );
 
       if (!context.mounted) return;
 
@@ -632,7 +643,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     }
 
     final normalizedTitle = normalizeQuery(parsed.title);
-    final candidates = await findSongCandidates(firestore, parsed.title);
+    final candidates = await resolveSongCandidates(
+      firestore,
+      songId: null,
+      rawTitle: parsed.title,
+      keyText: parsed.keyText,
+      teamId: widget.teamId,
+    );
     SongCandidate? matched;
     if (candidates.length == 1) {
       matched = candidates.first;
@@ -864,31 +881,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         return;
       }
       final titleCandidates = _songTitleCandidatesForLookup(rawTitle);
-      SongCandidate? matched;
-      for (final candidateTitle in titleCandidates) {
-        matched = await _matchSongAutomatically(firestore, candidateTitle);
-        if (matched != null) break;
-      }
-      if (matched == null) {
-        for (final candidateTitle in titleCandidates) {
-          final refSongIds = await findTeamSongRefCandidates(
-            firestore,
-            teamId: widget.teamId,
-            title: candidateTitle,
-          );
-          if (refSongIds.isEmpty) continue;
-          final refSongId = refSongIds.first;
-          final songSnapshot = await firestore
-              .collection('songs')
-              .doc(refSongId)
-              .get();
-          if (!songSnapshot.exists) continue;
-          final songTitle = (songSnapshot.data()?['title'] ?? candidateTitle)
-              .toString();
-          matched = SongCandidate(id: refSongId, title: songTitle);
-          break;
-        }
-      }
+      final matched = await resolvePrimarySongCandidate(
+        firestore,
+        songId: null,
+        rawTitle: titleCandidates.isEmpty ? rawTitle : titleCandidates.first,
+        keyText: rawKey,
+        teamId: widget.teamId,
+      );
       if (matched == null) {
         if (!context.mounted) return;
         final keyHint = (rawKey == null || rawKey.isEmpty)

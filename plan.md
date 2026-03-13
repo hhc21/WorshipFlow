@@ -570,149 +570,155 @@
 
 ---
 
-# 11. SP-08 Score System & Library Expansion (상세)
+# 11. SP-08 Score Resolution & LiveCue Preview Performance (상세)
 
 상태: 예정 (SP-07 증빙 마감 후 착수)
 
-## 11.1 목표
-- score preview UX를 제품 전 구간에서 통일
-- 관리자 중심 업로드 병목을 사용자 보조 성장 구조로 완화
-- score resolution 실패율 구조적 축소
-- 기존 운영 경로와 하위호환 유지
+## 11.1 Goal
+- project / library / LiveCue 전 구간에서 score resolution/preview 동작을 동일 규칙으로 정렬
+- LiveCue first-entry 지연을 현재 baseline(약 15s) 대비 실질적으로 단축
+- SP-13/SP-14 확장 이전에 안정적인 해상도/프리뷰 성능 기반선을 확립
 
-## 11.2 범위
-포함:
-- 인앱 score preview 통일
-- `songs_pending` 기반 제출/검수/승격 플로우
-- title/key/songId 기반 매칭 강화
-- searchable token 체계 확장
+## 11.2 Scope
+### 1) Score Resolution Consistency
+대상:
+- project setlist
+- song library
+- LiveCue preview
+- segment editors
 
-비포함:
-- 전면 아키텍처 재작성
-- canonical 모델 대규모 마이그레이션
-- LiveCue 엔진 ownership 변경
+핵심:
+- 모든 score lookup이 단일 resolver 경로를 사용
+- `songId` 우선 해석
+- title-only 상황에서 fallback 해석 안정화
+- `normalized title` / `aliases` / `team songRefs` 처리 일관화
+- display 문자열(`displayTitle`, `cueLabel`)은 lookup source-of-truth로 사용하지 않음
 
-## 11.3 Workstreams
-### WS-01 Unified In-App Score Preview
+### 2) Preview Flow Consistency
+대상:
+- project setlist 진입
+- library 진입
+- LiveCue preview 진입
+
+핵심:
+- in-app preview 우선
+- 외부 새 탭은 선택형 fallback로만 허용
+- 내비게이션 일관성 유지: `project -> song detail -> back -> project`
+- 프리뷰 경로별 중복 resolver 로직 제거
+
+### 3) LiveCue First-Entry Performance Optimization
 목표:
-- 라이브러리/프로젝트/LiveCue 진입점에서 인앱 프리뷰 기본화
+- first useful render를 가능한 빠르게 노출
+- 전체 asset 준비 전 첫 페이지 우선 렌더
 
-세부:
-- 대상 진입점 명시:
-  - admin score library: `lib/features/songs/global_song_panel.dart`
-  - user score library: `lib/features/songs/song_detail_page.dart`
-  - project score preview: project/setlist 진입 UI
-  - LiveCue score preview: LiveCue 내 score 확인 진입 UI
-- 엔트리 포인트별 preview 동작 매트릭스 작성
-- 기본 렌더링은 인앱 preview dialog/modal로 통일
-- 강제 새 탭 열기 동작은 제거하고, 선택형 fallback 액션으로만 유지
-- 지원 포맷을 명시적으로 고정:
-  - `jpg`
-  - `png`
-  - `jpeg`
-  - `webp`
-  - `pdf`
+전략:
+- First Useful Render 전략
+  - LiveCue enter
+  - `songId` resolve
+  - asset metadata fetch
+  - first page render
+  - remaining pages preload
+- Storage 요청 최적화
+  - 중복 `getDownloadURL()` 최소화
+  - resolved storage URL 캐시 재사용
+  - 가능한 경로는 병렬 요청으로 전환
+- staged loading
+  1. first page
+  2. remaining pages preload
+  3. background cache
+
+## 11.3 Out of Scope
+- community score upload pipeline (`songs_pending`) 전체 구현
+- moderation system
+- advanced metadata system
+- collaboration editing features
+- canonical 데이터 모델 전면 변경
+
+위 항목은 SP-13/SP-14 이후 단계에서 다룬다.
+
+## 11.4 Workstreams
+### WS-01 Unified Resolver Path
+- score lookup 공통 경로 강제
+- fallback 우선순위/정규화 규칙 고정
+- legacy setlist(`songId` 누락) sanitize/backfill 동작 점검
 
 DoD:
-- [ ] 주요 진입점 모두 인앱 프리뷰 우선
-- [ ] 새 탭 fallback은 선택적 옵션으로만 노출
-- [ ] preview dialog/modal 렌더링이 주요 진입점에서 동일 동작
-- [ ] 지원 포맷(`jpg/png/jpeg/webp/pdf`)이 동일 정책으로 표시
+- [ ] lookup 경로가 화면별로 분산되지 않고 단일화됨
+- [ ] title-only fallback 동작이 project/library/LiveCue에서 동일함
+- [ ] legacy 항목 해석 실패율 감소
 
-### WS-02 User-Contributed Song Database
-목표:
-- 사용자 제출형 확장 경로 도입
-
-세부:
-- 데이터 구조:
-  - canonical: `songs/{songId}`
-  - moderation queue: `songs_pending/{submissionId}`
-- `songs_pending/{submissionId}` 컬렉션 계약 정의
-- 검수 상태(`pending/approved/rejected/needs_edit`) 정의
-- 관리자 검수 UI/운영 프로세스 문서화
-- 제출 메타데이터 계약:
-  - 필수: `title`, `key`, `fileUrl`, `uploaderUid`, `createdAt`
-  - 선택: `artist`, `bpm`, `tags`, `category`, `aliases`
-- 관리자 액션 명시:
-  - `approve`
-  - `reject`
-  - `request edit`
-  - `merge duplicate`
-- 제품 목표:
-  - 관리자 업로드 병목 완화
-  - 곡 DB 성장 속도 향상
-  - 커뮤니티 기여 기반 확장
+### WS-02 Preview Consumer Alignment
+- preview consumer(관리자/사용자/프로젝트/LiveCue) 동작 통일
+- 지원 포맷 정책 통일: `jpg/png/jpeg/webp/pdf`
+- preview 진입/복귀 내비게이션 회귀 제거
 
 DoD:
-- [ ] 제출 -> 검수 -> 승격 플로우 동작
-- [ ] canonical `songs/{songId}` 오염 방지 규칙 반영
-- [ ] 필수/선택 메타데이터 계약이 문서/코드에서 일치
-- [ ] moderation 액션(approve/reject/request edit/merge duplicate) 동작 정의 완료
+- [ ] preview 진입점별 UX/동작이 일관됨
+- [ ] in-app preview 기본 동작 유지, 새 탭은 fallback로만 동작
+- [ ] 복귀 동선(project context) 회귀 없음
 
-### WS-03 Score Matching Stabilization
-목표:
-- setlist/LiveCue/library 간 해상도 실패율 저감
-
-해석 우선순위:
-1. `songId` direct
-2. `teams/{teamId}/songRefs`
-3. canonical title+key exact
-4. normalized token fallback
-
-세부:
-- 장식 문자열 제거 규칙(예: 숫자 prefix, 표시용 접미)
-- canonical title/key 정규화 규칙
-- 누락 `songId` backfill 정책
-- full Firestore collection scan 금지(인덱스 쿼리 + 토큰 기반 조회 우선)
-- legacy project setlist 호환을 유지하는 fallback 규칙 고정
+### WS-03 LiveCue First-Entry Latency Hardening
+- first page 우선 렌더로 초기 대기시간 축소
+- sequential Storage asset loading 병목 제거
+- repeated `getDownloadURL()` 호출 병목 완화
+- first useful render 이전 async loader 재실행 최소화
 
 DoD:
-- [ ] known 실패 케이스 재현률 유의미 감소
-- [ ] decorated string로 인한 조회 실패 제거
-- [ ] score not found 오류율 감소 추세 확인
-- [ ] full scan 없이 조회 성능/비용 기준 충족
+- [ ] first useful render 시간이 기존 baseline 대비 유의미하게 감소
+- [ ] 첫 페이지 렌더가 전체 asset 준비를 기다리지 않음
+- [ ] 중복 Storage 요청이 관측 로그 기준 감소
 
-### WS-04 Search Token Growth Mechanism
-목표:
-- 라이브러리 재사용률 향상, 중복 생성 억제
-
-세부:
-- `searchTokens` 생성 전략(공백/별칭/축약/로마자)
-- 유사 제목 중복 탐지 규칙
-- 관리자 merge 정책
-- 토큰 생성 예시(제목: `주의 집에 거하는 자`):
-  - 기본 토큰: `주의`, `집에`, `거하는`, `자`
-  - 파생 토큰: 공백 변형, 축약형, 로마자, `title+key` 조합
+### WS-04 Read Amplification Guard
+- resolver/preview 공용 경로의 중복 read 패턴 관측/억제
+- broad fallback query 사용 빈도 metric 추적
+- 동일 곡 다중 surface 진입 시 캐시 재사용 검증
 
 DoD:
-- [ ] 부분 검색 성공률 향상
-- [ ] 중복 song 생성률 감소 추세 확인
+- [ ] 동일 플로우 내 중복 song lookup read가 감소
+- [ ] `team songRefs`/canonical `songs` 중복 조회 억제
+- [ ] 신규 read amplification 회귀 없음
 
-### WS-05 Backward Compatibility
-목표:
-- 기존 프로젝트 데이터 강제 마이그레이션 없이 동작
+## 11.5 Definition of Done (통합)
+### Resolution Stability
+- [ ] 모든 score lookup이 unified resolver path를 사용
+- [ ] fallback title resolution이 일관되게 동작
+- [ ] legacy setlist(`songId` 없음) 항목도 해석 가능
 
-세부:
-- legacy setlist 항목 fallback 유지
-- 점진적 backfill 전략
-- 실패 케이스 운영 로그 수집
+### Preview Consistency
+- [ ] library/project/LiveCue 프리뷰 진입 동작 일관
+- [ ] preview 이후 back navigation이 문맥을 유지
 
-DoD:
-- [ ] 기존 setlist 재진입/조회/프리뷰 회귀 없음
+### LiveCue Performance
+- [ ] LiveCue first useful render가 현재 baseline(약 15s) 대비 체감 가능한 수준으로 단축
+- [ ] 남은 asset 전체 준비 완료 전에도 first page가 먼저 표시됨
+- [ ] repeated `getDownloadURL()` 호출이 최소화
 
-## 11.4 검증 기준
+### System Integrity
+- [ ] Firestore read amplification 신규 회귀 없음
+- [ ] 기존 테스트/게이트 유지
+- [ ] canonical/fallback 곡 모두 preview/resolution 정상
+
+## 11.6 Verification
 - `flutter analyze` PASS
 - `flutter test --reporter=compact` PASS
 - `bash scripts/ci/test_rules.sh` PASS
-- 수동 시나리오:
-  - admin library/user library/project/LiveCue 동일 곡 프리뷰 일관성
-  - 지원 포맷(`jpg/png/jpeg/webp/pdf`) 렌더링 일관성
-  - missing `songId` fallback/backfill 성공
-  - fallback 새 탭 동작은 옵션 경로에서만 활성
+- 수동 검증:
+  - 문제 곡/정상 곡 각각 project + library + LiveCue preview 비교
+  - first-entry/재진입 latency 비교
+  - fallback 경로(무 `songId`) 해석 일관성 확인
+  - read-heavy 시나리오에서 broad query metric 확인
 
-## 11.5 리스크
-- song metadata 품질 편차로 fallback 오탐 가능
-- 제출형 DB 도입 시 검수 대기 적체 가능
+## 11.7 Expected Impact
+- SP-08은 향후 확장(SP-13 canonicalization, SP-14 contribution pipeline)의 성능/안정성 기반선을 제공
+- 사용자 체감 개선:
+  - LiveCue 첫 진입 대기시간 단축
+  - 곡 해상도 실패율 감소
+  - preview 경로 혼선 감소
+
+## 11.8 리스크
+- legacy 데이터 품질 편차로 fallback 오탐 가능성
+- 네트워크/브라우저 상태에 따라 first-entry 개선폭 변동 가능성
+- 캐시 정책 과도 적용 시 stale preview 노출 위험(관측 로그로 추적 필요)
 
 ---
 
