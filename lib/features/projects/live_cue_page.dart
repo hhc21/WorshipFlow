@@ -273,6 +273,7 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
   String? keyText,
   String? fallbackTitle,
   bool preferStoredUrlForFirstRender,
+  int? pageVisibleAtEpochMs,
 ) async {
   final totalStopwatch = Stopwatch()..start();
   final resolverStopwatch = Stopwatch()..start();
@@ -290,6 +291,9 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
       fields: <String, Object?>{
         'status': 'no_song_candidates',
         'resolverMs': resolverStopwatch.elapsedMilliseconds,
+        if (pageVisibleAtEpochMs != null)
+          'sincePageVisibleMs':
+              DateTime.now().millisecondsSinceEpoch - pageVisibleAtEpochMs,
         'fallbackTitle': fallbackTitle,
         'songId': songId,
       },
@@ -379,6 +383,9 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
             'resolverMs': preview.resolverElapsedMs,
             'assetQueryMs': preview.assetQueryElapsedMs,
             'selectionMs': preview.selectionElapsedMs,
+            if (pageVisibleAtEpochMs != null)
+              'sincePageVisibleMs':
+                  DateTime.now().millisecondsSinceEpoch - pageVisibleAtEpochMs,
             'urlSource': preview.urlSource,
             'songCandidateCount': songIdCandidates.length,
             'assetDocCount': preview.assetDocCount,
@@ -403,6 +410,9 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
       'resolverMs': resolverStopwatch.elapsedMilliseconds,
       'assetQueryMs': assetQueryElapsedMs,
       'selectionMs': totalStopwatch.elapsedMilliseconds,
+      if (pageVisibleAtEpochMs != null)
+        'sincePageVisibleMs':
+            DateTime.now().millisecondsSinceEpoch - pageVisibleAtEpochMs,
       'songCandidateCount': songIdCandidates.length,
       'assetDocCount': totalAssetDocsRead,
       'fallbackTitle': fallbackTitle,
@@ -1272,12 +1282,14 @@ class LiveCueFullScreenPage extends ConsumerStatefulWidget {
   final String teamId;
   final String projectId;
   final bool startInDrawMode;
+  final int entryStartedAtEpochMs;
 
   const LiveCueFullScreenPage({
     super.key,
     required this.teamId,
     required this.projectId,
     this.startInDrawMode = false,
+    required this.entryStartedAtEpochMs,
   });
 
   @override
@@ -1328,7 +1340,12 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   Size _lastViewPhysicalSize = Size.zero;
   String? _lastVisiblePreviewMetricKey;
   final Set<String> _forceFreshPreviewCacheKeys = <String>{};
+  final Set<String> _viewerReadyMetricKeys = <String>{};
+  final Set<String> _nextViewerInitAppliedKeys = <String>{};
   static const Duration _adjacentPreviewDelay = Duration(milliseconds: 700);
+  int? _pageVisibleAtEpochMs;
+  bool _contextReadyMetricEmitted = false;
+  bool _syncReadyMetricEmitted = false;
 
   TransformationController get _viewerController =>
       _renderPresenter.viewerController;
@@ -1419,6 +1436,18 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     }
     _startViewerAuthSync();
     _scheduleOverlayAutoHide();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pageVisibleAtEpochMs != null) return;
+      _pageVisibleAtEpochMs = DateTime.now().millisecondsSinceEpoch;
+      OpsMetrics.emit(
+        'livecue_entry_page_visible',
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'elapsedMs': _pageVisibleAtEpochMs! - widget.entryStartedAtEpochMs,
+        },
+      );
+    });
   }
 
   @override
@@ -1543,7 +1572,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         const Duration(minutes: 40),
         (_) => unawaited(_refreshViewerIdToken(user, forceRefresh: true)),
       );
-      unawaited(_refreshViewerIdToken(user, forceRefresh: true));
+      unawaited(_refreshViewerIdToken(user));
       return;
     }
     if (_viewerIdToken == null && !_refreshingViewerIdToken) {
@@ -1563,6 +1592,18 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
       if (!mounted || token == null || token.isEmpty) return;
       if (_viewerIdToken == token) return;
       _viewerIdToken = token;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      OpsMetrics.emit(
+        'livecue_viewer_token_ready',
+        fields: <String, Object?>{
+          'forceRefresh': forceRefresh,
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'sinceEntryMs': nowMs - widget.entryStartedAtEpochMs,
+          if (_pageVisibleAtEpochMs != null)
+            'sincePageVisibleMs': nowMs - _pageVisibleAtEpochMs!,
+        },
+      );
       _markViewerNeedsBuild();
     } finally {
       _refreshingViewerIdToken = false;
@@ -1602,7 +1643,25 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     );
   }
 
-  void _onNextViewerProtocolLog(String message) {
+  void _onNextViewerProtocolLog(String viewerAssetKey, String message) {
+    if (message.contains('init-applied')) {
+      final added = _nextViewerInitAppliedKeys.add(viewerAssetKey);
+      if (added) {
+        final nowMs = DateTime.now().millisecondsSinceEpoch;
+        OpsMetrics.emit(
+          'livecue_viewer_handoff_ready',
+          fields: <String, Object?>{
+            'viewerKey': viewerAssetKey,
+            'teamId': widget.teamId,
+            'projectId': widget.projectId,
+            'sinceEntryMs': nowMs - widget.entryStartedAtEpochMs,
+            if (_pageVisibleAtEpochMs != null)
+              'sincePageVisibleMs': nowMs - _pageVisibleAtEpochMs!,
+          },
+        );
+        _markViewerNeedsBuild();
+      }
+    }
     if (_nextViewerStatus == message) return;
     if (!mounted) return;
     _nextViewerStatus = message;
@@ -1670,6 +1729,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
             resolvedKeyText,
             resolvedFallbackTitle,
             preferStoredUrlForFirstRender,
+            _pageVisibleAtEpochMs,
           ),
     );
   }
@@ -1721,6 +1781,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
               resolvedFallbackTitle,
             ),
           ),
+          _pageVisibleAtEpochMs,
         ),
   );
 
@@ -1784,6 +1845,29 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         'totalVisibleMs': preview.selectionElapsedMs + visibleLagMs,
         'assetDocCount': preview.assetDocCount,
         'usedLimitedAssetQuery': preview.usedLimitedAssetQuery,
+      },
+    );
+  }
+
+  void _emitViewerReadyMetric(
+    String viewerMetricKey,
+    _LiveCueAssetPreview preview, {
+    required String renderer,
+  }) {
+    if (_viewerReadyMetricKeys.contains(viewerMetricKey)) return;
+    _viewerReadyMetricKeys.add(viewerMetricKey);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    OpsMetrics.emit(
+      'livecue_viewer_ready',
+      fields: <String, Object?>{
+        'viewerKey': viewerMetricKey,
+        'renderer': renderer,
+        'resolvedSongId': preview.resolvedSongId,
+        'fileName': preview.fileName,
+        'urlSource': preview.urlSource,
+        'sinceSelectionMs': nowMs - preview.selectedAtEpochMs,
+        if (_pageVisibleAtEpochMs != null)
+          'sincePageVisibleMs': nowMs - _pageVisibleAtEpochMs!,
       },
     );
   }
@@ -2049,9 +2133,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         .collection('members')
         .doc(userId);
 
-    final project = await projectRef.get().timeout(const Duration(seconds: 12));
-    final member = await memberRef.get().timeout(const Duration(seconds: 12));
-    final team = await teamRef.get().timeout(const Duration(seconds: 12));
+    final results = await Future.wait<DocumentSnapshot<Map<String, dynamic>>>([
+      projectRef.get().timeout(const Duration(seconds: 12)),
+      memberRef.get().timeout(const Duration(seconds: 12)),
+      teamRef.get().timeout(const Duration(seconds: 12)),
+    ]);
+    final project = results[0];
+    final member = results[1];
+    final team = results[2];
     final createdBy = (team.data()?['createdBy'] ?? '').toString();
     final isTeamCreator = team.exists && createdBy == userId;
     return _LiveCueContext(
@@ -2290,6 +2379,20 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
         if (contextData == null || contextData.project.data() == null) {
           return const Scaffold(body: Center(child: Text('프로젝트를 찾을 수 없습니다.')));
         }
+        if (!_contextReadyMetricEmitted) {
+          _contextReadyMetricEmitted = true;
+          final nowMs = DateTime.now().millisecondsSinceEpoch;
+          OpsMetrics.emit(
+            'livecue_context_ready',
+            fields: <String, Object?>{
+              'teamId': widget.teamId,
+              'projectId': widget.projectId,
+              'sinceEntryMs': nowMs - widget.entryStartedAtEpochMs,
+              if (_pageVisibleAtEpochMs != null)
+                'sincePageVisibleMs': nowMs - _pageVisibleAtEpochMs!,
+            },
+          );
+        }
         if (!contextData.member.exists && !contextData.isTeamCreator) {
           return Scaffold(
             body: Center(
@@ -2457,6 +2560,22 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                       }
 
                       _resetCueRetryState();
+                      if (!_syncReadyMetricEmitted) {
+                        _syncReadyMetricEmitted = true;
+                        final nowMs = DateTime.now().millisecondsSinceEpoch;
+                        OpsMetrics.emit(
+                          'livecue_sync_ready',
+                          fields: <String, Object?>{
+                            'teamId': widget.teamId,
+                            'projectId': widget.projectId,
+                            'sinceEntryMs':
+                                nowMs - widget.entryStartedAtEpochMs,
+                            if (_pageVisibleAtEpochMs != null)
+                              'sincePageVisibleMs':
+                                  nowMs - _pageVisibleAtEpochMs!,
+                          },
+                        );
+                      }
                       final cueData = cueSnapshot.data?.data() ?? {};
                       _latestCueData = cueData;
                       if (items.isNotEmpty &&
@@ -2895,65 +3014,6 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                                             error,
                                                           ),
                                                 );
-                                          final canUseNextViewer =
-                                              _renderPresenter.canUseNextViewer;
-                                          if (canUseNextViewer &&
-                                              _viewerIdToken == null) {
-                                            return const Center(
-                                              child: CircularProgressIndicator(
-                                                color: Colors.white,
-                                              ),
-                                            );
-                                          }
-                                          if (canUseNextViewer &&
-                                              _viewerIdToken != null) {
-                                            final nextHostProps =
-                                                NextViewerHostProps(
-                                                  viewerUrl: _nextViewerUrl,
-                                                  initData: NextViewerInitData(
-                                                    teamId: widget.teamId,
-                                                    projectId: widget.projectId,
-                                                    currentSongId:
-                                                        currentSongId,
-                                                    currentKeyText: currentKey,
-                                                    scoreImageUrl: preview.url,
-                                                    idToken: _viewerIdToken!,
-                                                    canEdit:
-                                                        canEdit &&
-                                                        _drawingEnabled,
-                                                    editingSharedLayer:
-                                                        _editingSharedLayer,
-                                                    willReadFrequently:
-                                                        _nextViewerWillReadFrequently,
-                                                    privateStrokes:
-                                                        _privateLayerStrokes,
-                                                    sharedStrokes:
-                                                        _sharedLayerStrokes,
-                                                  ),
-                                                  syncRevision:
-                                                      _nextViewerSyncRevision,
-                                                  onInkCommit:
-                                                      _onNextViewerInkCommit,
-                                                  onDirtyChanged:
-                                                      _onNextViewerDirtyChanged,
-                                                  onAssetError:
-                                                      _onNextViewerAssetError,
-                                                  onProtocolLog:
-                                                      _onNextViewerProtocolLog,
-                                                );
-                                            return Center(
-                                              child: SizedBox(
-                                                width: constraints.maxWidth,
-                                                height: constraints.maxHeight,
-                                                child: NextViewerHostView(
-                                                  key: ValueKey(
-                                                    'next-viewer-$viewerAssetKey',
-                                                  ),
-                                                  props: nextHostProps,
-                                                ),
-                                              ),
-                                            );
-                                          }
                                           final canvasSize = Size(
                                             constraints.maxWidth,
                                             constraints.maxHeight,
@@ -3023,8 +3083,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                                   clipBehavior: Clip.none,
                                                   child: viewerContent,
                                                 );
-
-                                          return Center(
+                                          final flutterRenderer = Center(
                                             child: SizedBox(
                                               width: constraints.maxWidth,
                                               height: constraints.maxHeight,
@@ -3068,6 +3127,106 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                               ),
                                             ),
                                           );
+                                          final canUseNextViewer =
+                                              _renderPresenter.canUseNextViewer;
+                                          if (canUseNextViewer &&
+                                              _viewerIdToken == null) {
+                                            _emitViewerReadyMetric(
+                                              'flutter-token-wait:$viewerAssetKey',
+                                              preview,
+                                              renderer: 'flutter_token_wait',
+                                            );
+                                            return flutterRenderer;
+                                          }
+                                          if (canUseNextViewer &&
+                                              _viewerIdToken != null) {
+                                            final nextViewerInitApplied =
+                                                _nextViewerInitAppliedKeys
+                                                    .contains(viewerAssetKey);
+                                            _emitViewerReadyMetric(
+                                              nextViewerInitApplied
+                                                  ? 'next-viewer:$viewerAssetKey'
+                                                  : 'next-viewer-boot:$viewerAssetKey',
+                                              preview,
+                                              renderer: nextViewerInitApplied
+                                                  ? 'next_viewer'
+                                                  : 'next_viewer_boot',
+                                            );
+                                            final nextHostProps =
+                                                NextViewerHostProps(
+                                                  viewerUrl: _nextViewerUrl,
+                                                  initData: NextViewerInitData(
+                                                    teamId: widget.teamId,
+                                                    projectId: widget.projectId,
+                                                    currentSongId:
+                                                        currentSongId,
+                                                    currentKeyText: currentKey,
+                                                    scoreImageUrl: preview.url,
+                                                    idToken: _viewerIdToken!,
+                                                    canEdit:
+                                                        canEdit &&
+                                                        _drawingEnabled,
+                                                    editingSharedLayer:
+                                                        _editingSharedLayer,
+                                                    willReadFrequently:
+                                                        _nextViewerWillReadFrequently,
+                                                    privateStrokes:
+                                                        _privateLayerStrokes,
+                                                    sharedStrokes:
+                                                        _sharedLayerStrokes,
+                                                  ),
+                                                  syncRevision:
+                                                      _nextViewerSyncRevision,
+                                                  onInkCommit:
+                                                      _onNextViewerInkCommit,
+                                                  onDirtyChanged:
+                                                      _onNextViewerDirtyChanged,
+                                                  onAssetError:
+                                                      _onNextViewerAssetError,
+                                                  onProtocolLog: (message) =>
+                                                      _onNextViewerProtocolLog(
+                                                        viewerAssetKey,
+                                                        message,
+                                                      ),
+                                                );
+                                            final nextViewerWidget = Center(
+                                              child: SizedBox(
+                                                width: constraints.maxWidth,
+                                                height: constraints.maxHeight,
+                                                child: NextViewerHostView(
+                                                  key: ValueKey(
+                                                    'next-viewer-$viewerAssetKey',
+                                                  ),
+                                                  props: nextHostProps,
+                                                ),
+                                              ),
+                                            );
+                                            if (!nextViewerInitApplied) {
+                                              return Stack(
+                                                fit: StackFit.expand,
+                                                children: [
+                                                  flutterRenderer,
+                                                  Positioned.fill(
+                                                    child: IgnorePointer(
+                                                      ignoring: true,
+                                                      child: Opacity(
+                                                        opacity: 0.0,
+                                                        child:
+                                                            nextViewerWidget,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              );
+                                            }
+                                            return nextViewerWidget;
+                                          }
+                                          _emitViewerReadyMetric(
+                                            'flutter:$viewerAssetKey',
+                                            preview,
+                                            renderer: 'flutter',
+                                          );
+                                          return flutterRenderer;
                                         },
                                       );
                                     },
@@ -3790,15 +3949,19 @@ typedef _LiveCuePreviewLoader =
 class _LiveCueRenderPresenter {
   static const int _maxResolvedPreviewEntries = 28;
   static const int _maxPrefetchedPreviewEntries = 40;
+  static final Map<String, Future<_LiveCueAssetPreview?>> _sharedPreviewCache =
+      <String, Future<_LiveCueAssetPreview?>>{};
+  static final Map<String, _LiveCueAssetPreview> _sharedResolvedPreviewCache =
+      <String, _LiveCueAssetPreview>{};
+  static final Set<String> _sharedPrefetchedPreviewKeys = <String>{};
+  static final Set<String> _sharedQueuedPrefetchKeys = <String>{};
+  static final ListQueue<String> _sharedPreviewCacheOrder =
+      ListQueue<String>();
+  static final ListQueue<String> _sharedPrefetchCacheOrder =
+      ListQueue<String>();
 
   final bool isWeb;
   final TransformationController viewerController = TransformationController();
-  final Map<String, Future<_LiveCueAssetPreview?>> _previewCache = {};
-  final Map<String, _LiveCueAssetPreview> _resolvedPreviewCache = {};
-  final Set<String> _prefetchedPreviewKeys = <String>{};
-  final Set<String> _queuedPrefetchKeys = <String>{};
-  final ListQueue<String> _previewCacheOrder = ListQueue<String>();
-  final ListQueue<String> _prefetchCacheOrder = ListQueue<String>();
 
   bool showOverlay = true;
   Timer? _overlayTimer;
@@ -3818,16 +3981,10 @@ class _LiveCueRenderPresenter {
   bool get switchingImageRenderer => _switchingImageRenderer;
 
   _LiveCueAssetPreview? cachedPreview(String cacheKey) =>
-      _resolvedPreviewCache[cacheKey];
+      _sharedResolvedPreviewCache[cacheKey];
 
   void dispose() {
     _overlayTimer?.cancel();
-    _previewCache.clear();
-    _resolvedPreviewCache.clear();
-    _prefetchedPreviewKeys.clear();
-    _queuedPrefetchKeys.clear();
-    _previewCacheOrder.clear();
-    _prefetchCacheOrder.clear();
     viewerController.dispose();
   }
 
@@ -3858,27 +4015,27 @@ class _LiveCueRenderPresenter {
       return Future.value(null);
     }
     final cacheKey = previewCacheKey(safeSongId, keyText, safeTitle);
-    final existing = _previewCache[cacheKey];
+    final existing = _sharedPreviewCache[cacheKey];
     if (existing != null) return existing;
     final future = loader(safeSongId, keyText, safeTitle)
         .then((preview) {
           if (preview == null) {
-            _previewCache.remove(cacheKey);
-            _resolvedPreviewCache.remove(cacheKey);
-            _previewCacheOrder.remove(cacheKey);
+            _sharedPreviewCache.remove(cacheKey);
+            _sharedResolvedPreviewCache.remove(cacheKey);
+            _sharedPreviewCacheOrder.remove(cacheKey);
           } else {
-            _resolvedPreviewCache[cacheKey] = preview;
+            _sharedResolvedPreviewCache[cacheKey] = preview;
             _rememberResolvedPreview(cacheKey);
           }
           return preview;
         })
         .catchError((error, stackTrace) {
-          _previewCache.remove(cacheKey);
-          _resolvedPreviewCache.remove(cacheKey);
-          _previewCacheOrder.remove(cacheKey);
+          _sharedPreviewCache.remove(cacheKey);
+          _sharedResolvedPreviewCache.remove(cacheKey);
+          _sharedPreviewCacheOrder.remove(cacheKey);
           throw error;
         });
-    _previewCache[cacheKey] = future;
+    _sharedPreviewCache[cacheKey] = future;
     return future;
   }
 
@@ -3888,12 +4045,12 @@ class _LiveCueRenderPresenter {
     String? fallbackTitle,
   ) {
     final cacheKey = previewCacheKey(songId, keyText, fallbackTitle);
-    _previewCache.remove(cacheKey);
-    _resolvedPreviewCache.remove(cacheKey);
-    _prefetchedPreviewKeys.remove(cacheKey);
-    _queuedPrefetchKeys.remove(cacheKey);
-    _previewCacheOrder.remove(cacheKey);
-    _prefetchCacheOrder.remove(cacheKey);
+    _sharedPreviewCache.remove(cacheKey);
+    _sharedResolvedPreviewCache.remove(cacheKey);
+    _sharedPrefetchedPreviewKeys.remove(cacheKey);
+    _sharedQueuedPrefetchKeys.remove(cacheKey);
+    _sharedPreviewCacheOrder.remove(cacheKey);
+    _sharedPrefetchCacheOrder.remove(cacheKey);
   }
 
   void ensureViewerAssetKey(String key) {
@@ -3971,8 +4128,8 @@ class _LiveCueRenderPresenter {
     required BuildContext context,
     required bool Function() isMounted,
   }) {
-    if (_prefetchedPreviewKeys.contains(cacheKey)) return;
-    if (!_queuedPrefetchKeys.add(cacheKey)) return;
+    if (_sharedPrefetchedPreviewKeys.contains(cacheKey)) return;
+    if (!_sharedQueuedPrefetchKeys.add(cacheKey)) return;
     unawaited(
       previewFuture
           .then((preview) {
@@ -3993,31 +4150,31 @@ class _LiveCueRenderPresenter {
             // Prefetch is best effort only.
           })
           .whenComplete(() {
-            _queuedPrefetchKeys.remove(cacheKey);
+            _sharedQueuedPrefetchKeys.remove(cacheKey);
           }),
     );
   }
 
   void _rememberResolvedPreview(String cacheKey) {
-    _previewCacheOrder.remove(cacheKey);
-    _previewCacheOrder.addLast(cacheKey);
-    while (_previewCacheOrder.length > _maxResolvedPreviewEntries) {
-      final oldest = _previewCacheOrder.removeFirst();
-      _previewCache.remove(oldest);
-      _resolvedPreviewCache.remove(oldest);
-      _prefetchedPreviewKeys.remove(oldest);
-      _queuedPrefetchKeys.remove(oldest);
-      _prefetchCacheOrder.remove(oldest);
+    _sharedPreviewCacheOrder.remove(cacheKey);
+    _sharedPreviewCacheOrder.addLast(cacheKey);
+    while (_sharedPreviewCacheOrder.length > _maxResolvedPreviewEntries) {
+      final oldest = _sharedPreviewCacheOrder.removeFirst();
+      _sharedPreviewCache.remove(oldest);
+      _sharedResolvedPreviewCache.remove(oldest);
+      _sharedPrefetchedPreviewKeys.remove(oldest);
+      _sharedQueuedPrefetchKeys.remove(oldest);
+      _sharedPrefetchCacheOrder.remove(oldest);
     }
   }
 
   void _rememberPrefetchedPreview(String cacheKey) {
-    _prefetchCacheOrder.remove(cacheKey);
-    _prefetchCacheOrder.addLast(cacheKey);
-    _prefetchedPreviewKeys.add(cacheKey);
-    while (_prefetchCacheOrder.length > _maxPrefetchedPreviewEntries) {
-      final oldest = _prefetchCacheOrder.removeFirst();
-      _prefetchedPreviewKeys.remove(oldest);
+    _sharedPrefetchCacheOrder.remove(cacheKey);
+    _sharedPrefetchCacheOrder.addLast(cacheKey);
+    _sharedPrefetchedPreviewKeys.add(cacheKey);
+    while (_sharedPrefetchCacheOrder.length > _maxPrefetchedPreviewEntries) {
+      final oldest = _sharedPrefetchCacheOrder.removeFirst();
+      _sharedPrefetchedPreviewKeys.remove(oldest);
     }
   }
 
