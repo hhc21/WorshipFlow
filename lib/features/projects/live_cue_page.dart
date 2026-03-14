@@ -325,10 +325,7 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
       final path = rawPath.isEmpty ? null : rawPath;
       final previewIdentity = path ?? 'legacy:$candidateSongId:${selected.id}';
       try {
-        final url = await resolveAssetDownloadUrl(
-          storage,
-          data,
-        ).timeout(const Duration(seconds: 12));
+        final url = await resolveAssetDownloadUrl(storage, data);
         if (url == null || url.isEmpty) {
           continue;
         }
@@ -341,28 +338,13 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
             fileName.endsWith('.jpeg') ||
             fileName.endsWith('.webp');
 
-        Uint8List? initialBytes;
-        if (isImage && !kIsWeb) {
-          try {
-            if (path != null) {
-              initialBytes = await runWithRetry(
-                () => storage.ref(path).getData(kMaxSongAssetBytes),
-                maxAttempts: 2,
-              );
-            }
-          } catch (_) {
-            // Keep URL fallback path for environments where getData is flaky.
-            initialBytes = null;
-          }
-        }
-
         return _LiveCueAssetPreview(
           url: url,
           isImage: isImage,
           fileName: data['fileName']?.toString() ?? 'asset',
           storagePath: previewIdentity,
           resolvedSongId: candidateSongId,
-          initialBytes: initialBytes,
+          initialBytes: null,
         );
       } catch (_) {
         // Skip broken or inaccessible asset and try the next candidate.
@@ -1909,8 +1891,11 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     _lastWarmPreviewSignature = signature;
 
     _warmPreview(firestore, storage, currentSongId, currentKey, currentTitle);
-    _warmPreview(firestore, storage, prevSongId, prevKey, prevTitle);
-    _warmPreview(firestore, storage, nextSongId, nextKey, nextTitle);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _warmPreview(firestore, storage, prevSongId, prevKey, prevTitle);
+      _warmPreview(firestore, storage, nextSongId, nextKey, nextTitle);
+    });
   }
 
   Future<void> _seedFromSetlistIfNeeded(

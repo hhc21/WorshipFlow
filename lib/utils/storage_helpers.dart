@@ -1,8 +1,48 @@
+import 'dart:async';
+import 'dart:collection';
+
 import 'package:firebase_storage/firebase_storage.dart';
 
 import 'browser_types.dart';
 
 const int kMaxSongAssetBytes = 25 * 1024 * 1024;
+const int _maxResolvedAssetUrlEntries = 256;
+const Duration _assetDownloadUrlTimeout = Duration(seconds: 3);
+
+final Map<String, String> _resolvedAssetUrlCache = <String, String>{};
+final ListQueue<String> _resolvedAssetUrlCacheOrder = ListQueue<String>();
+
+void _rememberResolvedAssetUrl(String cacheKey, String url) {
+  _resolvedAssetUrlCache[cacheKey] = url;
+  _resolvedAssetUrlCacheOrder.remove(cacheKey);
+  _resolvedAssetUrlCacheOrder.addLast(cacheKey);
+  while (_resolvedAssetUrlCacheOrder.length > _maxResolvedAssetUrlEntries) {
+    final oldest = _resolvedAssetUrlCacheOrder.removeFirst();
+    _resolvedAssetUrlCache.remove(oldest);
+  }
+}
+
+Future<String?> _resolveFreshAssetDownloadUrl(
+  FirebaseStorage storage,
+  String path, {
+  required String cacheKey,
+  required int maxAttempts,
+}) async {
+  try {
+    final url = await runWithRetry(
+      () =>
+          storage.ref(path).getDownloadURL().timeout(_assetDownloadUrlTimeout),
+      maxAttempts: maxAttempts,
+    );
+    if (url.isNotEmpty) {
+      _rememberResolvedAssetUrl(cacheKey, url);
+      return url;
+    }
+  } catch (_) {
+    // Fall through to caller-managed fallback handling.
+  }
+  return null;
+}
 
 String buildSongAssetStoragePath(String songId, String originalFileName) {
   final ext = _normalizedExtension(originalFileName);
@@ -144,18 +184,34 @@ Future<String?> resolveAssetDownloadUrl(
   final path = assetData['storagePath']?.toString().trim();
   final storedUrl = assetData['downloadUrl']?.toString().trim();
   if (path != null && path.isNotEmpty) {
-    try {
-      return await runWithRetry(
-        () => storage.ref(path).getDownloadURL(),
-        maxAttempts: 2,
+    final cacheKey = 'path:$path';
+    final cached = _resolvedAssetUrlCache[cacheKey];
+    if (cached != null && cached.isNotEmpty) {
+      return cached;
+    }
+
+    final freshUrl = await _resolveFreshAssetDownloadUrl(
+      storage,
+      path,
+      cacheKey: cacheKey,
+      maxAttempts: storedUrl != null && storedUrl.isNotEmpty ? 1 : 2,
+    );
+    if (freshUrl != null && freshUrl.isNotEmpty) {
+      return freshUrl;
+    }
+
+    // If a previously stored download URL exists, return it immediately for
+    // first useful render and refresh the cache in the background.
+    if (storedUrl != null && storedUrl.isNotEmpty) {
+      unawaited(
+        _resolveFreshAssetDownloadUrl(
+          storage,
+          path,
+          cacheKey: cacheKey,
+          maxAttempts: 2,
+        ),
       );
-    } catch (_) {
-      // Prefer storagePath URL first, but allow legacy stored URL fallback
-      // so preview/open does not fail hard on temporary token issues.
-      if (storedUrl != null && storedUrl.isNotEmpty) {
-        return storedUrl;
-      }
-      return null;
+      return storedUrl;
     }
   }
   if (storedUrl != null && storedUrl.isNotEmpty) {
