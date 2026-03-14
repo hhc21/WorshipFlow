@@ -181,6 +181,8 @@ final routerProvider = Provider<GoRouter>((ref) {
                           teamId: teamId,
                           projectId: projectId,
                           startInDrawMode: startInDrawMode,
+                          entryStartedAtEpochMs:
+                              DateTime.now().millisecondsSinceEpoch,
                         ),
                       );
                     },

@@ -130,6 +130,7 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
         builder: (_, state) => LiveCueFullScreenPage(
           teamId: state.pathParameters['teamId']!,
           projectId: state.pathParameters['projectId']!,
+          entryStartedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
         ),
       ),
     ],
