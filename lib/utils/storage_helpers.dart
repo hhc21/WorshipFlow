@@ -12,6 +12,20 @@ const Duration _assetDownloadUrlTimeout = Duration(seconds: 3);
 final Map<String, String> _resolvedAssetUrlCache = <String, String>{};
 final ListQueue<String> _resolvedAssetUrlCacheOrder = ListQueue<String>();
 
+class AssetDownloadUrlResolution {
+  final String url;
+  final String source;
+  final bool hadStoredUrl;
+  final String? storagePath;
+
+  const AssetDownloadUrlResolution({
+    required this.url,
+    required this.source,
+    required this.hadStoredUrl,
+    required this.storagePath,
+  });
+}
+
 void _rememberResolvedAssetUrl(String cacheKey, String url) {
   _resolvedAssetUrlCache[cacheKey] = url;
   _resolvedAssetUrlCacheOrder.remove(cacheKey);
@@ -181,13 +195,45 @@ Future<String?> resolveAssetDownloadUrl(
   FirebaseStorage storage,
   Map<String, dynamic> assetData,
 ) async {
+  final resolved = await resolveAssetDownloadUrlWithMeta(storage, assetData);
+  return resolved?.url;
+}
+
+Future<AssetDownloadUrlResolution?> resolveAssetDownloadUrlWithMeta(
+  FirebaseStorage storage,
+  Map<String, dynamic> assetData, {
+  bool preferStoredUrlForFirstRender = false,
+}) async {
   final path = assetData['storagePath']?.toString().trim();
   final storedUrl = assetData['downloadUrl']?.toString().trim();
+  final hasStoredUrl = storedUrl != null && storedUrl.isNotEmpty;
   if (path != null && path.isNotEmpty) {
     final cacheKey = 'path:$path';
     final cached = _resolvedAssetUrlCache[cacheKey];
     if (cached != null && cached.isNotEmpty) {
-      return cached;
+      return AssetDownloadUrlResolution(
+        url: cached,
+        source: 'cache',
+        hadStoredUrl: hasStoredUrl,
+        storagePath: path,
+      );
+    }
+
+    if (preferStoredUrlForFirstRender && hasStoredUrl) {
+      unawaited(
+        _resolveFreshAssetDownloadUrl(
+          storage,
+          path,
+          cacheKey: cacheKey,
+          maxAttempts: 2,
+        ),
+      );
+      return AssetDownloadUrlResolution(
+        url: storedUrl,
+        source: 'stored_fast_path',
+        hadStoredUrl: true,
+        storagePath: path,
+      );
     }
 
     final freshUrl = await _resolveFreshAssetDownloadUrl(
@@ -197,7 +243,12 @@ Future<String?> resolveAssetDownloadUrl(
       maxAttempts: storedUrl != null && storedUrl.isNotEmpty ? 1 : 2,
     );
     if (freshUrl != null && freshUrl.isNotEmpty) {
-      return freshUrl;
+      return AssetDownloadUrlResolution(
+        url: freshUrl,
+        source: 'fresh',
+        hadStoredUrl: hasStoredUrl,
+        storagePath: path,
+      );
     }
 
     // If a previously stored download URL exists, return it immediately for
@@ -211,11 +262,21 @@ Future<String?> resolveAssetDownloadUrl(
           maxAttempts: 2,
         ),
       );
-      return storedUrl;
+      return AssetDownloadUrlResolution(
+        url: storedUrl,
+        source: 'stored_refresh_fallback',
+        hadStoredUrl: true,
+        storagePath: path,
+      );
     }
   }
   if (storedUrl != null && storedUrl.isNotEmpty) {
-    return storedUrl;
+    return AssetDownloadUrlResolution(
+      url: storedUrl,
+      source: 'stored_only',
+      hadStoredUrl: true,
+      storagePath: path,
+    );
   }
   return null;
 }

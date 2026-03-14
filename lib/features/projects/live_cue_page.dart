@@ -12,6 +12,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/ui_components.dart';
+import '../../core/ops/ops_metrics.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
@@ -271,7 +272,10 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
   String? songId,
   String? keyText,
   String? fallbackTitle,
+  bool preferStoredUrlForFirstRender,
 ) async {
+  final totalStopwatch = Stopwatch()..start();
+  final resolverStopwatch = Stopwatch()..start();
   final songIdCandidates = await _songIdCandidatesForPreview(
     firestore,
     teamId,
@@ -279,31 +283,41 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
     keyText,
     fallbackTitle,
   );
-  if (songIdCandidates.isEmpty) return null;
+  resolverStopwatch.stop();
+  if (songIdCandidates.isEmpty) {
+    OpsMetrics.emit(
+      'livecue_preview_selection',
+      fields: <String, Object?>{
+        'status': 'no_song_candidates',
+        'resolverMs': resolverStopwatch.elapsedMilliseconds,
+        'fallbackTitle': fallbackTitle,
+        'songId': songId,
+      },
+    );
+    return null;
+  }
   final normalizedKey = (keyText == null || keyText.trim().isEmpty)
       ? null
       : normalizeKeyText(keyText);
+  var assetQueryElapsedMs = 0;
+  var totalAssetDocsRead = 0;
 
   for (final candidateSongId in songIdCandidates) {
-    QuerySnapshot<Map<String, dynamic>> assetsSnapshot;
-    try {
-      assetsSnapshot = await firestore
-          .collection('songs')
-          .doc(candidateSongId)
-          .collection('assets')
-          .orderBy('createdAt', descending: true)
-          .get();
-    } catch (_) {
-      continue;
-    }
-    if (assetsSnapshot.docs.isEmpty) continue;
+    final assetQuery = await _queryLiveCuePreviewAssets(
+      firestore,
+      candidateSongId,
+      normalizedKey,
+    );
+    assetQueryElapsedMs += assetQuery.elapsedMs;
+    totalAssetDocsRead += assetQuery.docCount;
+    if (assetQuery.docs.isEmpty) continue;
 
-    final activeAssets = assetsSnapshot.docs
+    final activeAssets = assetQuery.docs
         .where((doc) => doc.data()['active'] != false)
         .toList();
     final sourceAssets = activeAssets.isNotEmpty
         ? activeAssets
-        : assetsSnapshot.docs;
+        : assetQuery.docs;
 
     final candidates = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
     if (normalizedKey != null) {
@@ -325,8 +339,13 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
       final path = rawPath.isEmpty ? null : rawPath;
       final previewIdentity = path ?? 'legacy:$candidateSongId:${selected.id}';
       try {
-        final url = await resolveAssetDownloadUrl(storage, data);
-        if (url == null || url.isEmpty) {
+        final urlResolution = await resolveAssetDownloadUrlWithMeta(
+          storage,
+          data,
+          preferStoredUrlForFirstRender: preferStoredUrlForFirstRender,
+        );
+        final url = urlResolution?.url;
+        if (url == null || url.isEmpty || urlResolution == null) {
           continue;
         }
         final contentType = data['contentType']?.toString().toLowerCase() ?? '';
@@ -338,14 +357,38 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
             fileName.endsWith('.jpeg') ||
             fileName.endsWith('.webp');
 
-        return _LiveCueAssetPreview(
+        final preview = _LiveCueAssetPreview(
           url: url,
           isImage: isImage,
           fileName: data['fileName']?.toString() ?? 'asset',
           storagePath: previewIdentity,
           resolvedSongId: candidateSongId,
           initialBytes: null,
+          resolverElapsedMs: resolverStopwatch.elapsedMilliseconds,
+          assetQueryElapsedMs: assetQueryElapsedMs,
+          selectionElapsedMs: totalStopwatch.elapsedMilliseconds,
+          urlSource: urlResolution.source,
+          assetDocCount: totalAssetDocsRead,
+          usedLimitedAssetQuery: assetQuery.usedLimitedQuery,
+          selectedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
         );
+        OpsMetrics.emit(
+          'livecue_preview_selection',
+          fields: <String, Object?>{
+            'status': 'selected',
+            'resolverMs': preview.resolverElapsedMs,
+            'assetQueryMs': preview.assetQueryElapsedMs,
+            'selectionMs': preview.selectionElapsedMs,
+            'urlSource': preview.urlSource,
+            'songCandidateCount': songIdCandidates.length,
+            'assetDocCount': preview.assetDocCount,
+            'usedLimitedAssetQuery': preview.usedLimitedAssetQuery,
+            'resolvedSongId': preview.resolvedSongId,
+            'fileName': preview.fileName,
+            'normalizedKey': normalizedKey,
+          },
+        );
+        return preview;
       } catch (_) {
         // Skip broken or inaccessible asset and try the next candidate.
         continue;
@@ -353,7 +396,83 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
     }
   }
 
+  OpsMetrics.emit(
+    'livecue_preview_selection',
+    fields: <String, Object?>{
+      'status': 'no_asset_selected',
+      'resolverMs': resolverStopwatch.elapsedMilliseconds,
+      'assetQueryMs': assetQueryElapsedMs,
+      'selectionMs': totalStopwatch.elapsedMilliseconds,
+      'songCandidateCount': songIdCandidates.length,
+      'assetDocCount': totalAssetDocsRead,
+      'fallbackTitle': fallbackTitle,
+      'songId': songId,
+      'normalizedKey': normalizedKey,
+    },
+  );
   return null;
+}
+
+const int _liveCuePreviewHeadLimit = 6;
+
+class _LiveCuePreviewAssetQueryResult {
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
+  final int elapsedMs;
+  final int docCount;
+  final bool usedLimitedQuery;
+
+  const _LiveCuePreviewAssetQueryResult({
+    required this.docs,
+    required this.elapsedMs,
+    required this.docCount,
+    required this.usedLimitedQuery,
+  });
+}
+
+Future<_LiveCuePreviewAssetQueryResult> _queryLiveCuePreviewAssets(
+  FirebaseFirestore firestore,
+  String songId,
+  String? normalizedKey,
+) async {
+  final stopwatch = Stopwatch()..start();
+  try {
+    final baseQuery = firestore
+        .collection('songs')
+        .doc(songId)
+        .collection('assets')
+        .orderBy('createdAt', descending: true);
+    final headSnapshot = await baseQuery.limit(_liveCuePreviewHeadLimit).get();
+    final headDocs = headSnapshot.docs;
+    final shouldRunFullQuery =
+        normalizedKey != null &&
+        headDocs.length == _liveCuePreviewHeadLimit &&
+        headDocs.every((doc) => !isAssetKeyMatch(doc.data(), normalizedKey));
+    if (!shouldRunFullQuery) {
+      stopwatch.stop();
+      return _LiveCuePreviewAssetQueryResult(
+        docs: headDocs,
+        elapsedMs: stopwatch.elapsedMilliseconds,
+        docCount: headDocs.length,
+        usedLimitedQuery: true,
+      );
+    }
+    final fullSnapshot = await baseQuery.get();
+    stopwatch.stop();
+    return _LiveCuePreviewAssetQueryResult(
+      docs: fullSnapshot.docs,
+      elapsedMs: stopwatch.elapsedMilliseconds,
+      docCount: fullSnapshot.docs.length,
+      usedLimitedQuery: false,
+    );
+  } catch (_) {
+    stopwatch.stop();
+    return const _LiveCuePreviewAssetQueryResult(
+      docs: <QueryDocumentSnapshot<Map<String, dynamic>>>[],
+      elapsedMs: 0,
+      docCount: 0,
+      usedLimitedQuery: true,
+    );
+  }
 }
 
 int _keySortWeight(String keyText) {
@@ -1207,6 +1326,9 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   int? _previousImageCacheMaxEntries;
   int? _previousImageCacheMaxBytes;
   Size _lastViewPhysicalSize = Size.zero;
+  String? _lastVisiblePreviewMetricKey;
+  final Set<String> _forceFreshPreviewCacheKeys = <String>{};
+  static const Duration _adjacentPreviewDelay = Duration(milliseconds: 700);
 
   TransformationController get _viewerController =>
       _renderPresenter.viewerController;
@@ -1526,20 +1648,31 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     String? songId,
     String? keyText,
     String? fallbackTitle,
-  ) => _renderPresenter.loadPreviewCached(
-    songId: songId,
-    keyText: keyText,
-    fallbackTitle: fallbackTitle,
-    loader: (resolvedSongId, resolvedKeyText, resolvedFallbackTitle) =>
-        _loadCurrentPreview(
-          firestore,
-          storage,
-          widget.teamId,
-          resolvedSongId,
-          resolvedKeyText,
-          resolvedFallbackTitle,
-        ),
-  );
+  ) {
+    final cacheKey = _previewCacheKey(
+      songId?.trim() ?? '',
+      keyText,
+      fallbackTitle,
+    );
+    final preferStoredUrlForFirstRender = !_forceFreshPreviewCacheKeys.contains(
+      cacheKey,
+    );
+    return _renderPresenter.loadPreviewCached(
+      songId: songId,
+      keyText: keyText,
+      fallbackTitle: fallbackTitle,
+      loader: (resolvedSongId, resolvedKeyText, resolvedFallbackTitle) =>
+          _loadCurrentPreview(
+            firestore,
+            storage,
+            widget.teamId,
+            resolvedSongId,
+            resolvedKeyText,
+            resolvedFallbackTitle,
+            preferStoredUrlForFirstRender,
+          ),
+    );
+  }
 
   Future<List<String>> _loadAvailableKeysCached(
     FirebaseFirestore firestore,
@@ -1561,7 +1694,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   void _syncImageRendererKey(String key) =>
       _renderPresenter.syncImageRendererKey(key);
 
-  void _warmPreview(
+  Future<_LiveCueAssetPreview?> _warmPreview(
     FirebaseFirestore firestore,
     FirebaseStorage storage,
     String? songId,
@@ -1581,6 +1714,13 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
           resolvedSongId,
           resolvedKeyText,
           resolvedFallbackTitle,
+          !_forceFreshPreviewCacheKeys.contains(
+            _previewCacheKey(
+              resolvedSongId,
+              resolvedKeyText,
+              resolvedFallbackTitle,
+            ),
+          ),
         ),
   );
 
@@ -1620,6 +1760,59 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     if (!mounted) return;
     _markViewerNeedsBuild();
     _markOverlayNeedsBuild();
+  }
+
+  void _emitPreviewVisibleMetric(
+    String previewMetricKey,
+    _LiveCueAssetPreview preview,
+  ) {
+    if (_lastVisiblePreviewMetricKey == previewMetricKey) return;
+    _lastVisiblePreviewMetricKey = previewMetricKey;
+    final visibleLagMs =
+        DateTime.now().millisecondsSinceEpoch - preview.selectedAtEpochMs;
+    OpsMetrics.emit(
+      'livecue_preview_visible',
+      fields: <String, Object?>{
+        'previewKey': previewMetricKey,
+        'resolvedSongId': preview.resolvedSongId,
+        'fileName': preview.fileName,
+        'urlSource': preview.urlSource,
+        'resolverMs': preview.resolverElapsedMs,
+        'assetQueryMs': preview.assetQueryElapsedMs,
+        'selectionMs': preview.selectionElapsedMs,
+        'visibleLagMs': visibleLagMs,
+        'totalVisibleMs': preview.selectionElapsedMs + visibleLagMs,
+        'assetDocCount': preview.assetDocCount,
+        'usedLimitedAssetQuery': preview.usedLimitedAssetQuery,
+      },
+    );
+  }
+
+  void _retryPreviewWithFreshUrl({
+    required String cacheKey,
+    required String? songId,
+    required String? keyText,
+    required String? fallbackTitle,
+    required _LiveCueAssetPreview preview,
+  }) {
+    if (!_forceFreshPreviewCacheKeys.add(cacheKey)) {
+      return;
+    }
+    OpsMetrics.emit(
+      'livecue_preview_stored_url_retry',
+      fields: <String, Object?>{
+        'cacheKey': cacheKey,
+        'resolvedSongId': preview.resolvedSongId,
+        'fileName': preview.fileName,
+        'urlSource': preview.urlSource,
+      },
+    );
+    _evictPreviewCache(songId ?? '', keyText, fallbackTitle);
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _markViewerNeedsBuild();
+    });
   }
 
   Future<_LiveCueContext> _ensureContextFuture(
@@ -1890,12 +2083,37 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     if (_lastWarmPreviewSignature == signature) return;
     _lastWarmPreviewSignature = signature;
 
-    _warmPreview(firestore, storage, currentSongId, currentKey, currentTitle);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _warmPreview(firestore, storage, prevSongId, prevKey, prevTitle);
-      _warmPreview(firestore, storage, nextSongId, nextKey, nextTitle);
-    });
+    final currentWarmStartedAt = DateTime.now().millisecondsSinceEpoch;
+    final currentWarm = _warmPreview(
+      firestore,
+      storage,
+      currentSongId,
+      currentKey,
+      currentTitle,
+    );
+    unawaited(
+      currentWarm.whenComplete(() {
+        Future<void>.delayed(_adjacentPreviewDelay, () {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            if (_drawingEnabled && _activeDrawingPointer != null) return;
+            OpsMetrics.emit(
+              'livecue_adjacent_preload_start',
+              fields: <String, Object?>{
+                'elapsedSinceCurrentWarmMs':
+                    DateTime.now().millisecondsSinceEpoch -
+                    currentWarmStartedAt,
+                'currentSongId': currentSongId,
+                'prevSongId': prevSongId,
+                'nextSongId': nextSongId,
+              },
+            );
+            _warmPreview(firestore, storage, prevSongId, prevKey, prevTitle);
+            _warmPreview(firestore, storage, nextSongId, nextKey, nextTitle);
+          });
+        });
+      }),
+    );
   }
 
   Future<void> _seedFromSetlistIfNeeded(
@@ -2551,6 +2769,29 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                           Widget buildImageLoadError(
                                             Object error,
                                           ) {
+                                            if (preview.urlSource.startsWith(
+                                                  'stored',
+                                                ) &&
+                                                !_forceFreshPreviewCacheKeys
+                                                    .contains(
+                                                      currentPreviewCacheKey,
+                                                    )) {
+                                              _retryPreviewWithFreshUrl(
+                                                cacheKey:
+                                                    currentPreviewCacheKey,
+                                                songId: currentSongId,
+                                                keyText: currentKey,
+                                                fallbackTitle:
+                                                    currentPreviewTitle,
+                                                preview: preview,
+                                              );
+                                              return const Center(
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      color: Colors.white,
+                                                    ),
+                                              );
+                                            }
                                             final switched = _renderPresenter
                                                 .tryActivateHtmlImageFallback(
                                                   hasInitialBytes:
@@ -2584,6 +2825,31 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                                   filterQuality:
                                                       FilterQuality.high,
                                                   gaplessPlayback: true,
+                                                  frameBuilder:
+                                                      (
+                                                        context,
+                                                        child,
+                                                        frame,
+                                                        wasSynchronouslyLoaded,
+                                                      ) {
+                                                        if (wasSynchronouslyLoaded ||
+                                                            frame != null) {
+                                                          WidgetsBinding
+                                                              .instance
+                                                              .addPostFrameCallback((
+                                                                _,
+                                                              ) {
+                                                                if (!mounted) {
+                                                                  return;
+                                                                }
+                                                                _emitPreviewVisibleMetric(
+                                                                  viewerAssetKey,
+                                                                  preview,
+                                                                );
+                                                              });
+                                                        }
+                                                        return child;
+                                                      },
                                                   errorBuilder:
                                                       (context, error, stack) =>
                                                           buildImageLoadError(
@@ -2609,6 +2875,10 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                                                       ) {
                                                         if (loadingProgress ==
                                                             null) {
+                                                          _emitPreviewVisibleMetric(
+                                                            viewerAssetKey,
+                                                            preview,
+                                                          );
                                                           return child;
                                                         }
                                                         return const Center(
@@ -3666,7 +3936,7 @@ class _LiveCueRenderPresenter {
     return true;
   }
 
-  void warmPreview({
+  Future<_LiveCueAssetPreview?> warmPreview({
     required String? songId,
     required String? keyText,
     required String? fallbackTitle,
@@ -3676,7 +3946,9 @@ class _LiveCueRenderPresenter {
   }) {
     final safeSongId = songId?.trim() ?? '';
     final safeTitle = fallbackTitle?.trim() ?? '';
-    if (safeSongId.isEmpty && safeTitle.isEmpty) return;
+    if (safeSongId.isEmpty && safeTitle.isEmpty) {
+      return Future<_LiveCueAssetPreview?>.value(null);
+    }
     final cacheKey = previewCacheKey(safeSongId, keyText, safeTitle);
     final previewFuture = loadPreviewCached(
       songId: safeSongId,
@@ -3690,6 +3962,7 @@ class _LiveCueRenderPresenter {
       context: context,
       isMounted: isMounted,
     );
+    return previewFuture;
   }
 
   void _queuePreviewPrefetch({
@@ -3825,6 +4098,13 @@ class _LiveCueAssetPreview {
   final String storagePath;
   final String? resolvedSongId;
   final Uint8List? initialBytes;
+  final int resolverElapsedMs;
+  final int assetQueryElapsedMs;
+  final int selectionElapsedMs;
+  final String urlSource;
+  final int assetDocCount;
+  final bool usedLimitedAssetQuery;
+  final int selectedAtEpochMs;
 
   const _LiveCueAssetPreview({
     required this.url,
@@ -3833,6 +4113,13 @@ class _LiveCueAssetPreview {
     required this.storagePath,
     this.resolvedSongId,
     this.initialBytes,
+    this.resolverElapsedMs = 0,
+    this.assetQueryElapsedMs = 0,
+    this.selectionElapsedMs = 0,
+    this.urlSource = 'unknown',
+    this.assetDocCount = 0,
+    this.usedLimitedAssetQuery = true,
+    this.selectedAtEpochMs = 0,
   });
 }
 

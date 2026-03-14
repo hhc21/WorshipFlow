@@ -30,6 +30,7 @@ class _NextViewerHostWebState extends State<_NextViewerHostWeb> {
   late final html.IFrameElement _iframe;
   StreamSubscription<html.MessageEvent>? _messageSub;
   int _requestSeed = 0;
+  final Stopwatch _hostInitStopwatch = Stopwatch();
 
   bool _viewerReady = false;
   String _lastInitSignature = '';
@@ -56,6 +57,7 @@ class _NextViewerHostWebState extends State<_NextViewerHostWeb> {
     });
 
     _messageSub = html.window.onMessage.listen(_handleMessage);
+    _hostInitStopwatch.start();
     OpsMetrics.emit(
       'livecue_session_metric',
       fields: <String, Object?>{
@@ -143,11 +145,27 @@ class _NextViewerHostWebState extends State<_NextViewerHostWeb> {
       case 'viewer-ready':
         _viewerReady = true;
         _log('viewer-ready received');
+        OpsMetrics.emit(
+          'livecue_session_metric',
+          fields: <String, Object?>{
+            'event': 'viewer_ready',
+            'viewerUrl': widget.props.viewerUrl,
+            'elapsedMs': _hostInitStopwatch.elapsedMilliseconds,
+          },
+        );
         _sendHostInitIfNeeded(force: true);
         break;
       case 'init-applied':
         widget.props.onDirtyChanged(false);
         _log('init-applied acknowledged');
+        OpsMetrics.emit(
+          'livecue_session_metric',
+          fields: <String, Object?>{
+            'event': 'viewer_init_applied',
+            'viewerUrl': widget.props.viewerUrl,
+            'elapsedMs': _hostInitStopwatch.elapsedMilliseconds,
+          },
+        );
         break;
       case 'ink-dirty':
         widget.props.onDirtyChanged(true);
