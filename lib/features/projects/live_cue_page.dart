@@ -1346,6 +1346,13 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   int? _pageVisibleAtEpochMs;
   bool _contextReadyMetricEmitted = false;
   bool _syncReadyMetricEmitted = false;
+  bool _bootstrapPreviewLoading = false;
+  bool _bootstrapPreviewReady = false;
+  bool _firstPreviewBeforeSyncMetricEmitted = false;
+  String? _bootstrapPreviewScopeKey;
+  List<QueryDocumentSnapshot<Map<String, dynamic>>> _bootstrapSetlist =
+      <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+  Map<String, dynamic> _bootstrapCueData = const <String, dynamic>{};
 
   TransformationController get _viewerController =>
       _renderPresenter.viewerController;
@@ -1745,6 +1752,251 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     return _songKeysFutureCache.putIfAbsent(
       songId,
       () => _loadAvailableKeysForSong(firestore, songId),
+    );
+  }
+
+  bool _canRenderPreviewBeforeSync({
+    required List<QueryDocumentSnapshot<Map<String, dynamic>>> items,
+    required Map<String, dynamic> cueData,
+  }) {
+    if (items.isEmpty) return false;
+    if (items.length == 1) return true;
+    return _hasCueValue(cueData, 'current');
+  }
+
+  void _ensureBootstrapPreviewSeed(FirebaseFirestore firestore) {
+    if (!kIsWeb) return;
+    if (_bootstrapPreviewLoading) return;
+    final scopeKey = '${widget.teamId}/${widget.projectId}';
+    if (_bootstrapPreviewScopeKey == scopeKey && _bootstrapPreviewReady) {
+      return;
+    }
+    _bootstrapPreviewLoading = true;
+    _bootstrapPreviewScopeKey = scopeKey;
+    unawaited(_loadBootstrapPreviewSeed(firestore));
+  }
+
+  Future<void> _loadBootstrapPreviewSeed(FirebaseFirestore firestore) async {
+    final setlistQuery = _setlistRefFor(
+      firestore,
+      widget.teamId,
+      widget.projectId,
+    ).orderBy('order');
+    final liveCueRef = _liveCueRefFor(firestore, widget.teamId, widget.projectId);
+    final cueFuture = () async {
+      try {
+        return await liveCueRef.get().timeout(const Duration(seconds: 4));
+      } catch (_) {
+        return null;
+      }
+    }();
+    try {
+      final results = await Future.wait<Object?>([
+        setlistQuery.get().timeout(const Duration(seconds: 4)),
+        cueFuture,
+      ]);
+      if (!mounted) return;
+      final setlistSnapshot = results[0]! as QuerySnapshot<Map<String, dynamic>>;
+      final cueSnapshot = results[1] as DocumentSnapshot<Map<String, dynamic>>?;
+      final cueData = cueSnapshot?.data() ?? const <String, dynamic>{};
+      final items = setlistSnapshot.docs;
+      setState(() {
+        _bootstrapSetlist = items;
+        _bootstrapCueData = cueData;
+        _bootstrapPreviewReady = _canRenderPreviewBeforeSync(
+          items: items,
+          cueData: cueData,
+        );
+      });
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      OpsMetrics.emit(
+        'livecue_first_candidate_ready',
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'setlistCount': items.length,
+          'hasCurrentCue': _hasCueValue(cueData, 'current'),
+          'previewReady': _bootstrapPreviewReady,
+          'source': 'bootstrap_get',
+          if (_pageVisibleAtEpochMs != null)
+            'sincePageVisibleMs': nowMs - _pageVisibleAtEpochMs!,
+          'sinceEntryMs': nowMs - widget.entryStartedAtEpochMs,
+        },
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _bootstrapPreviewScopeKey = null;
+    } finally {
+      _bootstrapPreviewLoading = false;
+    }
+  }
+
+  void _emitFirstPreviewBeforeSyncMetric({
+    required String? songId,
+    required String? keyText,
+    required String title,
+  }) {
+    if (_firstPreviewBeforeSyncMetricEmitted) return;
+    _firstPreviewBeforeSyncMetricEmitted = true;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    OpsMetrics.emit(
+      'livecue_first_preview_before_sync',
+      fields: <String, Object?>{
+        'teamId': widget.teamId,
+        'projectId': widget.projectId,
+        'songId': songId,
+        'keyText': keyText,
+        'title': title,
+        'sinceEntryMs': nowMs - widget.entryStartedAtEpochMs,
+        if (_pageVisibleAtEpochMs != null)
+          'sincePageVisibleMs': nowMs - _pageVisibleAtEpochMs!,
+      },
+    );
+  }
+
+  Widget _buildPendingSyncPreview({
+    required FirebaseFirestore firestore,
+    required FirebaseStorage storage,
+    required List<QueryDocumentSnapshot<Map<String, dynamic>>> items,
+    required Map<String, dynamic> cueData,
+  }) {
+    final syncState = LiveCueResolvedState.resolve(
+      items: items,
+      cueData: cueData,
+      cueLabelFromItem: _cueLabelFromItem,
+      titleFromItem: _titleFromItem,
+      keyFromItem: _keyFromItem,
+      normalizeKeyText: normalizeKeyText,
+    );
+    final currentSongId = syncState.currentSongId;
+    final currentTitle = syncState.currentTitle;
+    final currentKey = syncState.currentKey;
+    final currentLabel = syncState.currentLabel;
+    final currentPreviewTitle = syncState.setlistCurrentTitle.isNotEmpty
+        ? syncState.setlistCurrentTitle
+        : currentTitle;
+    _emitFirstPreviewBeforeSyncMetric(
+      songId: currentSongId,
+      keyText: currentKey,
+      title: currentPreviewTitle,
+    );
+    final currentPreviewCacheKey = _previewCacheKey(
+      currentSongId?.trim() ?? '',
+      currentKey,
+      currentPreviewTitle,
+    );
+    final cachedCurrentPreview = _renderPresenter.cachedPreview(
+      currentPreviewCacheKey,
+    );
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        FutureBuilder<_LiveCueAssetPreview?>(
+          future: _loadPreviewCached(
+            firestore,
+            storage,
+            currentSongId,
+            currentKey,
+            currentPreviewTitle,
+          ),
+          builder: (context, previewSnapshot) {
+            final preview = previewSnapshot.data ?? cachedCurrentPreview;
+            if (preview == null) {
+              return const Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              );
+            }
+            _emitViewerReadyMetric(
+              'flutter-before-sync:$currentPreviewCacheKey',
+              preview,
+              renderer: 'flutter_before_sync',
+            );
+            if (!preview.isImage) {
+              return Center(
+                child: Text(
+                  '악보 준비 중... (${_lineText(label: currentLabel, title: currentTitle, keyText: currentKey)})',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              );
+            }
+            final bytes = preview.initialBytes;
+            final imageWidget =
+                bytes != null && bytes.isNotEmpty
+                ? Image.memory(
+                    bytes,
+                    fit: BoxFit.contain,
+                    filterQuality: FilterQuality.high,
+                    gaplessPlayback: true,
+                    frameBuilder:
+                        (context, child, frame, wasSynchronouslyLoaded) {
+                          if (wasSynchronouslyLoaded || frame != null) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (!mounted) return;
+                              _emitPreviewVisibleMetric(
+                                currentPreviewCacheKey,
+                                preview,
+                              );
+                            });
+                          }
+                          return child;
+                        },
+                  )
+                : Image.network(
+                    preview.url,
+                    fit: BoxFit.contain,
+                    filterQuality: FilterQuality.high,
+                    gaplessPlayback: true,
+                    loadingBuilder: (context, child, loadingProgress) {
+                      if (loadingProgress == null) {
+                        _emitPreviewVisibleMetric(
+                          currentPreviewCacheKey,
+                          preview,
+                        );
+                        return child;
+                      }
+                      return const Center(
+                        child: CircularProgressIndicator(color: Colors.white),
+                      );
+                    },
+                    errorBuilder: (context, error, stack) => Center(
+                      child: Text(
+                        '악보 로드 실패: ${preview.fileName}',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  );
+            return Center(child: imageWidget);
+          },
+        ),
+        Positioned(
+          top: 8,
+          left: 8,
+          child: IconButton(
+            style: IconButton.styleFrom(
+              backgroundColor: Colors.black54,
+            ),
+            onPressed: _handleBackNavigation,
+            icon: const Icon(Icons.arrow_back, color: Colors.white),
+          ),
+        ),
+        Positioned(
+          top: 12,
+          right: 12,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Text(
+              'LiveCue 동기화 중... 미리보기 먼저 표시',
+              style: TextStyle(color: Colors.white, fontSize: 12),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2430,6 +2682,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
           widget.teamId,
           widget.projectId,
         );
+        _ensureBootstrapPreviewSeed(firestore);
         final liveCueRef = _liveCueRefFor(
           firestore,
           widget.teamId,
@@ -2450,7 +2703,9 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
               focusNode: _focusNode,
               autofocus: true,
               onKeyEvent: (node, event) {
-                if (!canEdit || event is! KeyDownEvent) {
+                if (!canEdit ||
+                    !_syncReadyMetricEmitted ||
+                    event is! KeyDownEvent) {
                   return KeyEventResult.ignored;
                 }
                 if (_latestSetlist.isEmpty) {
@@ -2483,13 +2738,20 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: setlistStream,
                 builder: (context, setlistSnapshot) {
+                  final bootstrapSetlistReady =
+                      _bootstrapPreviewReady && _bootstrapSetlist.isNotEmpty;
+                  final items = setlistSnapshot.data?.docs ??
+                      (bootstrapSetlistReady
+                          ? _bootstrapSetlist
+                          : const <QueryDocumentSnapshot<Map<String, dynamic>>>[]);
                   if (setlistSnapshot.connectionState ==
-                      ConnectionState.waiting) {
+                          ConnectionState.waiting &&
+                      items.isEmpty) {
                     return const Center(
                       child: CircularProgressIndicator(color: Colors.white),
                     );
                   }
-                  if (setlistSnapshot.hasError) {
+                  if (setlistSnapshot.hasError && items.isEmpty) {
                     return Center(
                       child: Text(
                         '콘티 로드 실패: ${setlistSnapshot.error}',
@@ -2497,15 +2759,27 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
                       ),
                     );
                   }
-                  final items = setlistSnapshot.data?.docs ?? [];
                   _latestSetlist = items;
 
                   return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
                     stream: cueStream,
                     builder: (context, cueSnapshot) {
+                      final bootstrapCueReady = _bootstrapPreviewReady &&
+                          _canRenderPreviewBeforeSync(
+                            items: items,
+                            cueData: _bootstrapCueData,
+                          );
                       if (cueSnapshot.connectionState ==
                           ConnectionState.waiting) {
                         _beginCueWaitingWatchdog();
+                        if (bootstrapCueReady) {
+                          return _buildPendingSyncPreview(
+                            firestore: firestore,
+                            storage: storage,
+                            items: items,
+                            cueData: _bootstrapCueData,
+                          );
+                        }
                         if (_isCueWaitingTimedOut) {
                           if (!_cueAutoRetryAttempted) {
                             _scheduleCueAutoRetry();
