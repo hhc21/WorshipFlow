@@ -38,8 +38,8 @@
 
 WorshipFlow는 현재
 
-**“LiveCue 엔진과 운영 기능은 완성되었고  
-남은 핵심 과제는 Release Gate 승인 증빙 패키지 마감과 최종 판정이다.”**
+**“SP-07 Release Gate는 저장소 기준으로 종료되었고  
+SP-08 score resolution / LiveCue preview stabilization까지 main에 반영된 상태다.”**
 
 ---
 
@@ -50,20 +50,20 @@ UX 안정화        ██████████ 100%
 운영 기능        ██████████ 100%
 운영 안정화      ██████████ 100%
 협업 기능        ░░░░░░░░░░ 0%
-배포 준비        ████████░░ 80%
+배포 준비        ██████████ 100%
 현재 상태 요약
 
 - 엔진 구조 개발 완료
 - 운영 기능 개발 완료
 - 운영 안정화 완료
 - 실기 시나리오 PASS 문서화 완료 (`docs/ops/device_validation.md`)
-- Release Gate 기준선/런북 정렬 완료
-- Release Gate 실행 증빙 패키지 정리 대기
-- 최종 PASS / FAIL 승인 판정 대기
+- Release Gate historical close 반영
+- SP-08 resolver / preview / latency stabilization 반영
+- 현재 `main`은 release-gate 직전 상태가 아니라 post-SP-08 mainline 상태
 
 현재 위치
 
-**Production Release 직전 단계**
+**Post-SP-08 Mainline / Next Workstream Planning**
 
 ---
 
@@ -115,15 +115,15 @@ SP-04 실기기 안정화
 - preview cache 관리
 - 정적 검증 통과
 
-남은 것
+후속 메모
 
-- Release Gate 증빙 패키지에 시나리오별 timestamp/build/log/media 링크 연결
-- 승인 문서(`release_checklist.md`)와 교차 검증
+- SP-04 실기 시나리오 PASS는 유지된다.
+- 추가 evidence 정밀도 보강은 운영 문서 품질 관리 범위로 다룬다.
 
 의미
 
-코드와 기기 시나리오 문서는 정렬되었고  
-이제 승인 문서 패키징과 최종 판정만 남아 있다.
+코드와 기기 시나리오 문서는 정렬되어 있고  
+현재는 post-SP-08 기준에서 회귀 관측과 다음 단계 계획이 우선이다.
 
 ---
 
@@ -191,7 +191,7 @@ WorshipFlow는 이제
 
 # 4.5 RELEASE GATE
 
-진행도: 80%
+진행도: 100%
 
 포함 단계
 
@@ -206,11 +206,12 @@ SP-07 배포 게이트
 - 대형 파일 변경 가이드 정의
 - 정적 게이트 3종 기준 정렬 및 최근 실행 통과
 - 기기 검증 시나리오 PASS 문서 반영
+- `wf-v1.0.0` 기준 historical release evidence 기록
+- 이후 mainline은 SP-08 구현 단계로 진행
 
-남은 것
+후속 메모
 
-- runbook/checklist 증빙 패키지 정리(시각/빌드/로그/미디어 링크)
-- Release Gate 최종 PASS / FAIL 판정
+- post-deploy runtime 관측 기록은 release-gate open blocker가 아니라 후속 안정화 입력으로 관리
 
 ---
 
@@ -220,7 +221,7 @@ SP-07 배포 게이트
 
 예정 단계
 
-SP-08 이후
+SP-11 이후
 
 예정 기능
 
@@ -308,31 +309,33 @@ docs/
 
 # 8. 지금 남은 핵심 과제
 
-1️⃣ Release Gate 실행 증빙 패키지 마감
+1️⃣ post-SP-08 runtime regression 관측
 
-- 시나리오별 timestamp(KST) 정리
-- build/release version 기입
-- 로그 참조 위치 연결
-- 스크린샷/영상 링크 연결
+- LiveCue attach/re-entry timing 재발 여부 추적
+- fullscreen first-visible latency 회귀 추적
+- legacy setlist canonical hygiene 재관측
 
-2️⃣ Release Gate 최종 판정
+2️⃣ maintainability hotspot 관리
 
-- analyze
-- test
-- rules test
-- runtime metric 확인
+- large file watchlist 유지
+- hotspot별 미니 패치 원칙 유지
+- 변경 빈도/회귀 집중도 기반 분리 우선순위 관리
 
-3️⃣ first-error 운영 루프 시작 (배포 후)
+3️⃣ 다음 workstream 기준선 확정
+
+- SP-09 metadata layer
+- SP-13 canonical score expansion
+- SP-14 contribution pipeline
 
 ---
 
 # 9. 다음 단계
 
-Release checklist 최종 서명
+post-SP-08 회귀 샘플 축적
 
-Release Gate PASS / FAIL 확정
+다음 SP 우선순위 확정
 
-Production 배포 승인 여부 결정
+대형 파일/운영 리스크 정렬
 
 ---
 

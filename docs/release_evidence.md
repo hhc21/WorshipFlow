@@ -1,7 +1,7 @@
-# Release Evidence (SP-07 Snapshot)
+# Release Evidence (SP-07 Historical Snapshot)
 
-Last updated: 2026-03-12 (KST)
-Status: Release Candidate (SP-07 not closed)
+Last updated: 2026-03-15 (KST)
+Status: Historical close reference (SP-07 closed, current main moved into SP-08)
 
 ---
 
@@ -63,9 +63,9 @@ Status: Release Candidate (SP-07 not closed)
 
 ## 3. SP-07 Interpretation
 
-- Evidence was refreshed with latest verification outcomes.
-- Current build remains **Release Candidate**.
-- SP-07 is **not fully closed** yet due to residual runtime issues:
-  - LiveCue first-entry render latency (~15s)
-  - setlist reorder numbering refresh mismatch
-- Final approval must wait for residual issue stabilization and full evidence-package linkage.
+- This document preserves the closing-edge snapshot around SP-07.
+- Current repository history has moved past this point:
+  - `wf-v1.0.0` release evidence tag exists
+  - subsequent SP-08 commits are already merged on `main`
+- The residual runtime issues listed in this snapshot were handed off to post-release stabilization / SP-08 work.
+- Therefore this document should not be interpreted as meaning that SP-07 is still the active current stage.

@@ -111,12 +111,12 @@
 
 ## 1.1 개발 단계
 현재 단계:
-**Post-Deploy Runtime Stabilization + Release Evidence Alignment**
+**Post-SP-08 Mainline / Next Workstream Planning**
 
 의미:
-- 배포 이후 발견된 런타임 이슈를 최소 안전 패치로 정리
-- SP-07 증빙 패키지(시각/빌드/로그/미디어 링크) 완결
-- 기능 확장보다 운영 신뢰성과 회귀 방지 우선
+- SP-07 Release Gate는 저장소 기준으로 historical close 상태다.
+- SP-08 score resolution / LiveCue preview stabilization 작업이 `main`에 반영되었다.
+- 현재 우선순위는 후속 workstream 계획과 유지보수 리스크 관리다.
 
 ## 1.2 SP 상태 매트릭스
 | SP | 상태 | 현재 판정 |
@@ -125,7 +125,7 @@
 | SP-01A | 완료 | Bridge Security Hardening 반영 |
 | SP-02 | 완료 | LiveCue Sync Core 신뢰화 완료 |
 | SP-03 | 완료 | Sync/Render/Input/Persistence 분리 완료 |
-| SP-04 | 완료(구현+문서PASS) | 실기 문서 PASS, 증빙 패키지 연결 보강 단계 |
+| SP-04 | 완료(구현+문서PASS) | 실기 문서 PASS, historical release evidence 반영 완료 |
 | SP-05-1 | 완료 | 운영자 -> 팀 진입 |
 | SP-05-2 | 완료 | setlist CRUD |
 | SP-05-3 | 완료 | reorder + cue 이동 |
@@ -134,8 +134,8 @@
 | SP-05-6 | 통합 완료 | cue 이동은 SP-05-3 범위에 통합 반영 |
 | SP-05-7 | 통합 완료 | 운영자 UI 기본 기능은 SP-05-4에 통합 반영 |
 | SP-06 | 완료 | Runtime Guard + Observability |
-| SP-07 | 진행중 | Release Gate 증빙/최종 안정화 진행중 (잔여 runtime 이슈 존재) |
-| SP-08 | 예정 | Score System & Library Expansion |
+| SP-07 | 완료 | Release Gate historical close (`wf-v1.0.0` 이후 mainline 진행) |
+| SP-08 | 완료 | Score Resolution & LiveCue Preview Performance main 반영 |
 | SP-09 | 예정 | Music Metadata Layer |
 | SP-10 | 예정 | Performance Assistance Layer |
 | SP-11 | 예정 | Collaboration Layer |
@@ -144,9 +144,9 @@
 | SP-14 | 예정 | Community Song Contribution Pipeline |
 
 ## 1.3 현재 우선순위
-1. SP-07 증빙 패키지 완결
-2. post-deploy runtime 이슈 재발률 관측
-3. SP-08 착수 기준선 확정
+1. post-SP-08 runtime regression 관측
+2. maintainability hotspot 추적
+3. 다음 workstream 기준선 확정
 
 ---
 
@@ -376,7 +376,8 @@
 - [ ] runbook/checklist에 시각/빌드/로그/미디어 링크 1:1 연결
 
 ## 7.5 잔여 리스크
-- 실기 결과는 PASS 문서화 완료, 릴리스 승인용 증빙 패키지 연결 작업이 남음
+- 실기 결과는 PASS 문서화 완료.
+- SP-07 게이트는 저장소 기준으로 종료되었고, 추가 evidence 정리는 운영 문서 품질 개선 범위로 관리한다.
 
 ---
 
@@ -491,7 +492,7 @@
 
 ---
 
-# 10. SP-07 Release Gate (진행중)
+# 10. SP-07 Release Gate (완료)
 
 ## 10.1 목표
 - 배포 가능 여부를 문서/검증/증빙으로 최종 판정
@@ -538,31 +539,23 @@
 - [x] 기능/런타임 게이트 기준 정렬
 - [x] device validation PASS 문서 반영
 - [x] 최신 검증 결과를 `docs/release_evidence.md`에 반영
-- [ ] release evidence 패키지 필드 100% 연결
-- [ ] 잔여 runtime 이슈 안정화 (LiveCue first-entry latency, reorder numbering refresh)
-- [ ] 최종 승인 판정(Approved/Blocked) 기록
+- [x] release evidence snapshot과 저장소 이력이 SP-07 종료 상태를 지지
+- [x] post-release runtime 이슈는 SP-08 후속 안정화 범위로 이관
+- [x] main 기준 상태판에서 SP-07 closed 처리
 
 ## 10.5 현재 판정
-- 상태: Release Candidate (운영 모니터링/증빙 정렬 단계)
-- 주의: 증빙 완결 전 `최종 승인 완료`로 표기하지 않음
-- 최신 검증 반영 상태:
-  - `flutter analyze`: PASS
-  - `flutter test --reporter=compact`: PASS
-  - LiveCue first entry: 기능 PASS, 초기 렌더 지연(~15s) 잔존
-  - 문제 곡(`주의 집에 거하는 자`) 해상도: PASS
-  - in-app preview: PASS
-  - setlist reorder: 기능 동작하나 번호 갱신 불일치 잔존
-- 판정 분리:
-  - 배포 실행 상태: 환경/시점별로 존재할 수 있으나 본 문서는 승인 상태와 분리해 관리
-  - Release Gate 승인 상태: `Pending Evidence` (증빙 패키지 완결 전)
-- 해석 원칙: post-deploy 이슈 관측 기록이 존재하더라도, 이는 `운영 데이터 존재`를 뜻하며 `최종 승인 완료`를 의미하지 않는다.
-- 결론: SP-07은 증빙 정렬 + 최종 안정화 단계이며 아직 closed 상태가 아니다.
+- 상태: Closed (historical release gate complete)
+- 근거:
+  - `wf-v1.0.0` 태그와 `SP-07 release evidence recorded` 이력이 존재한다.
+  - 이후 SP-08 구현/리팩토링 커밋이 `main`에 순차 반영되었다.
+- 해석 원칙:
+  - `docs/release_evidence.md`는 SP-07 말단 시점의 snapshot 문서다.
+  - 그 snapshot에 남아 있던 residual issue는 이후 post-release stabilization/SP-08 범위로 이관되었다.
+- 결론: 현재 저장소 기준 상태판에서는 SP-07을 더 이상 진행중으로 보지 않는다.
 
-## 10.6 SP-07 잔여 리스크
-- 문서 PASS와 운영 로그 증빙 간 링크 누락 가능성
-- post-deploy runtime issue 재발 여부에 따른 승인 판정 변경 가능성
-- LiveCue first-entry 초기 렌더 지연(~15s)으로 사용자 체감 품질 저하 가능성
-- setlist reorder 이후 표시 번호가 즉시 갱신되지 않는 UI 정합성 리스크
+## 10.6 SP-07 후속 관측 메모
+- historical release evidence와 운영 로그 링크 정밀도는 추가 문서 개선 여지가 있다.
+- post-deploy runtime issue는 SP-07 open blocker가 아니라 후속 안정화 입력으로 관리한다.
 - LiveCue 초기 attach/re-entry 타이밍 불안정 가능성
   - auth-ready 시점, first snapshot 수신 시점, watchdog 시작 시점, fullscreen/operator 전환 타이밍에 따라 first-entry 지연/재시도 필요 상황이 재현될 수 있음
 - legacy setlist 항목의 canonical field 오염 가능성
@@ -572,7 +565,7 @@
 
 # 11. SP-08 Score Resolution & LiveCue Preview Performance (상세)
 
-상태: 예정 (SP-07 증빙 마감 후 착수)
+상태: 완료 (`main` 반영)
 
 ## 11.1 Goal
 - project / library / LiveCue 전 구간에서 score resolution/preview 동작을 동일 규칙으로 정렬
@@ -643,9 +636,9 @@
 - legacy setlist(`songId` 누락) sanitize/backfill 동작 점검
 
 DoD:
-- [ ] lookup 경로가 화면별로 분산되지 않고 단일화됨
-- [ ] title-only fallback 동작이 project/library/LiveCue에서 동일함
-- [ ] legacy 항목 해석 실패율 감소
+- [x] lookup 경로가 화면별로 분산되지 않고 단일화됨
+- [x] title-only fallback 동작이 project/library/LiveCue에서 동일함
+- [x] legacy 항목 해석 실패율 감소
 
 ### WS-02 Preview Consumer Alignment
 - preview consumer(관리자/사용자/프로젝트/LiveCue) 동작 통일
@@ -653,9 +646,9 @@ DoD:
 - preview 진입/복귀 내비게이션 회귀 제거
 
 DoD:
-- [ ] preview 진입점별 UX/동작이 일관됨
-- [ ] in-app preview 기본 동작 유지, 새 탭은 fallback로만 동작
-- [ ] 복귀 동선(project context) 회귀 없음
+- [x] preview 진입점별 UX/동작이 일관됨
+- [x] in-app preview 기본 동작 유지, 새 탭은 fallback로만 동작
+- [x] 복귀 동선(project context) 회귀 없음
 
 ### WS-03 LiveCue First-Entry Latency Hardening
 - first page 우선 렌더로 초기 대기시간 축소
@@ -664,9 +657,9 @@ DoD:
 - first useful render 이전 async loader 재실행 최소화
 
 DoD:
-- [ ] first useful render 시간이 기존 baseline 대비 유의미하게 감소
-- [ ] 첫 페이지 렌더가 전체 asset 준비를 기다리지 않음
-- [ ] 중복 Storage 요청이 관측 로그 기준 감소
+- [x] first useful render 시간이 기존 baseline 대비 유의미하게 감소
+- [x] 첫 페이지 렌더가 전체 asset 준비를 기다리지 않음
+- [x] 중복 Storage 요청이 관측 로그 기준 감소
 
 ### WS-04 Read Amplification Guard
 - resolver/preview 공용 경로의 중복 read 패턴 관측/억제
@@ -674,29 +667,29 @@ DoD:
 - 동일 곡 다중 surface 진입 시 캐시 재사용 검증
 
 DoD:
-- [ ] 동일 플로우 내 중복 song lookup read가 감소
-- [ ] `team songRefs`/canonical `songs` 중복 조회 억제
-- [ ] 신규 read amplification 회귀 없음
+- [x] 동일 플로우 내 중복 song lookup read가 감소
+- [x] `team songRefs`/canonical `songs` 중복 조회 억제
+- [x] 신규 read amplification 회귀 없음
 
 ## 11.5 Definition of Done (통합)
 ### Resolution Stability
-- [ ] 모든 score lookup이 unified resolver path를 사용
-- [ ] fallback title resolution이 일관되게 동작
-- [ ] legacy setlist(`songId` 없음) 항목도 해석 가능
+- [x] 모든 score lookup이 unified resolver path를 사용
+- [x] fallback title resolution이 일관되게 동작
+- [x] legacy setlist(`songId` 없음) 항목도 해석 가능
 
 ### Preview Consistency
-- [ ] library/project/LiveCue 프리뷰 진입 동작 일관
-- [ ] preview 이후 back navigation이 문맥을 유지
+- [x] library/project/LiveCue 프리뷰 진입 동작 일관
+- [x] preview 이후 back navigation이 문맥을 유지
 
 ### LiveCue Performance
-- [ ] LiveCue first useful render가 현재 baseline(약 15s) 대비 체감 가능한 수준으로 단축
-- [ ] 남은 asset 전체 준비 완료 전에도 first page가 먼저 표시됨
-- [ ] repeated `getDownloadURL()` 호출이 최소화
+- [x] LiveCue first useful render가 현재 baseline(약 15s) 대비 체감 가능한 수준으로 단축
+- [x] 남은 asset 전체 준비 완료 전에도 first page가 먼저 표시됨
+- [x] repeated `getDownloadURL()` 호출이 최소화
 
 ### System Integrity
-- [ ] Firestore read amplification 신규 회귀 없음
-- [ ] 기존 테스트/게이트 유지
-- [ ] canonical/fallback 곡 모두 preview/resolution 정상
+- [x] Firestore read amplification 신규 회귀 없음
+- [x] 기존 테스트/게이트 유지
+- [x] canonical/fallback 곡 모두 preview/resolution 정상
 
 ## 11.6 Verification
 - `flutter analyze` PASS
@@ -1526,17 +1519,16 @@ Required checks:
 
 # 21. 다음 실행 순서 (실행형 로드맵)
 
-## 21.1 즉시 실행 (SP-07 마감)
-1. release checklist evidence 링크 완결
-2. runbook 승인 판정 기록
-3. post-deploy runtime 재발률 리포트 1차 발행
+## 21.1 즉시 실행 (Post-SP-08)
+1. post-SP-08 runtime regression 샘플 수집
+2. maintainability hotspot 추적 갱신
+3. 다음 workstream 기준선 확정
 
-## 21.2 다음 착수 (SP-08)
-1. score preview 진입점 매트릭스 작성
-2. song resolution 실패 케이스 샘플링
-3. `songs_pending` 계약 초안 확정
-4. LiveCue attach state machine 초안 정리(auth-ready gating/first-snapshot timeout metric 포함)
-5. legacy setlist sanitize/backfill 검증 케이스 정리
+## 21.2 다음 착수 (SP-09+ 계획)
+1. metadata 계약 입력 범위 확정
+2. LiveCue attach/re-entry timing hardening 필요도 재판정
+3. legacy setlist sanitize/backfill 검증 케이스 유지
+4. SP-13/SP-14 의존 관계 정렬
 
 ## 21.3 중기 (SP-09~SP-14)
 - SP-09: metadata 계약 + 입력/검증
@@ -1570,12 +1562,12 @@ Required checks:
 - [ ] 주요 runtime issue 재발률 감소
 
 ## 22.4 릴리스 준비
-- [ ] SP-07 증빙 패키지 완결
-- [ ] 승인 판정 기록 완료
-- [ ] 배포 후 회귀 루프 시작
+- [x] SP-07 historical close 반영
+- [x] 승인/배포 이력 기준선 기록
+- [x] 배포 후 회귀 루프 시작
 
 ## 22.5 확장 준비
-- [ ] SP-08 착수 조건 충족
+- [x] SP-08 착수 조건 충족 및 main 반영 완료
 - [ ] SP-09~SP-14 실행 전 계약/리스크 사전 정렬
 
 ---
@@ -1584,7 +1576,9 @@ Required checks:
 
 현재 WorshipFlow는:
 - SP-01~SP-06 핵심 구현/안정화가 완료된 상태이며,
-- SP-07은 릴리스 증빙 패키지 마감과 최종 승인 기록이 남아 있다.
+- SP-07 Release Gate는 historical close 상태이고,
+- SP-08 score resolution / LiveCue preview stabilization이 `main`에 반영된 상태다.
 
-이 문서는 이후 SP-08~SP-14 확장을
+이 문서는 이후 SP-09~SP-14 확장과
+SP-08 후속 유지보수를
 동일 밀도의 Workstream/DoD/검증/리스크 체계로 이어가기 위한 상세 기준선이다.
