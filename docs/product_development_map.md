@@ -39,7 +39,8 @@
 WorshipFlow는 현재
 
 **“SP-07 Release Gate는 저장소 기준으로 종료되었고  
-SP-08 score resolution / LiveCue preview stabilization까지 main에 반영된 상태다.”**
+SP-08 score resolution / LiveCue preview stabilization,  
+SP-09 music metadata layer까지 main에 반영된 상태다.”**
 
 ---
 
@@ -59,11 +60,12 @@ UX 안정화        ██████████ 100%
 - 실기 시나리오 PASS 문서화 완료 (`docs/ops/device_validation.md`)
 - Release Gate historical close 반영
 - SP-08 resolver / preview / latency stabilization 반영
-- 현재 `main`은 release-gate 직전 상태가 아니라 post-SP-08 mainline 상태
+- SP-09 typed metadata boundary / LiveCue read-only metadata rendering 반영
+- 현재 `main`은 release-gate 직전 상태가 아니라 post-SP-09 mainline 상태
 
 현재 위치
 
-**Post-SP-08 Mainline / Next Workstream Planning**
+**Post-SP-09 Mainline / Pre-Deploy Baseline Refresh**
 
 ---
 
@@ -123,7 +125,7 @@ SP-04 실기기 안정화
 의미
 
 코드와 기기 시나리오 문서는 정렬되어 있고  
-현재는 post-SP-08 기준에서 회귀 관측과 다음 단계 계획이 우선이다.
+현재는 post-SP-09 기준에서 회귀 관측과 다음 단계 계획이 우선이다.
 
 ---
 
@@ -309,7 +311,7 @@ docs/
 
 # 8. 지금 남은 핵심 과제
 
-1️⃣ post-SP-08 runtime regression 관측
+1️⃣ post-SP-09 runtime regression 관측
 
 - LiveCue attach/re-entry timing 재발 여부 추적
 - fullscreen first-visible latency 회귀 추적
@@ -323,15 +325,15 @@ docs/
 
 3️⃣ 다음 workstream 기준선 확정
 
-- SP-09 metadata layer
+- SP-10 setlist metadata display enhancements
+- song subtitle / alias resolution direction
 - SP-13 canonical score expansion
-- SP-14 contribution pipeline
 
 ---
 
 # 9. 다음 단계
 
-post-SP-08 회귀 샘플 축적
+post-SP-09 회귀 샘플 축적
 
 다음 SP 우선순위 확정
 

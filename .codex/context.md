@@ -24,7 +24,7 @@ Core product capabilities include:
 - release-gate based validation workflow
 
 This repository is already beyond early MVP stage.
-It is currently in **pre-release validation / release gate execution stage**.
+It is currently in **post-SP-08 mainline / next workstream planning stage**.
 
 ---
 
@@ -64,27 +64,29 @@ Current SP status:
 - SP-01A complete
 - SP-02 complete
 - SP-03 complete
-- SP-04 implementation complete / real-device evidence pending
+- SP-04 complete (implementation + device validation docs PASS)
 - SP-05-1 complete
 - SP-05-2 complete
 - SP-05-3 complete
 - SP-05-4 complete
 - SP-06 complete
-- SP-07 in release-gate / pre-release audit stage
+- SP-07 complete (historical release-gate close)
+- SP-08 complete
 
 Current stage summary:
 
-**Release Candidate / Pre-Release Validation**
+**Post-SP-08 Mainline / Next Workstream Planning**
 
 This means:
 
 - core engine work is complete
 - product feature work is complete
 - runtime safety work is complete
-- release readiness, device validation, and deployment decision are the current priorities
+- SP-08 resolver/preview stabilization is already merged on `main`
+- current priorities are post-SP-08 regression observation, maintainability, and next workstream planning
 
 Do not behave as if this is an early feature-building phase.
-This repository is in stabilization and release-readiness mode.
+This repository is in post-release stabilization and planning mode.
 
 ---
 
@@ -94,21 +96,21 @@ Rough progress snapshot:
 
 - Engine development: 100%
 - UX stabilization: 100%
-- Real-device stabilization: 70%
+- Real-device stabilization: 100% (documented basis)
 - Product features: 100%
 - Runtime safety: 100%
+- Score resolution / preview stabilization: 100%
 - Collaboration layer: 0%
-- Release preparation: in progress
+- Release preparation: historical close on current main
 
 Interpretation:
 
 - The core product is built
 - Runtime protection exists
-- The remaining critical work is:
-  - SP-04 real-device evidence
-  - SP-07 release gate execution
-  - post-gate deployment decision
-  - later collaboration work
+- The current follow-up work is:
+  - post-SP-08 runtime regression observation
+  - maintainability hotspot control
+  - later metadata / collaboration / score-system expansion work
 
 ---
 
@@ -194,9 +196,9 @@ Release-gate policy is defined mainly in:
 - `plan.md`
 - `docs/release_runbook.md`
 
-SP-07 is not a feature-expansion phase.
+SP-07 was not a feature-expansion phase.
 
-SP-07 is about:
+Historically, SP-07 covered:
 
 - release readiness confirmation
 - static validation
@@ -209,12 +211,13 @@ SP-07 is about:
 
 If asked to help with SP-07, bias toward:
 
-- audits
+- historical audits
 - documentation alignment
-- operational readiness
-- test/readiness checklists
+- evidence interpretation
+- release-history consistency checks
 
 Do not treat SP-07 as “build new features.”
+Do not assume SP-07 is still the active current stage on `main`.
 
 ---
 
@@ -364,7 +367,7 @@ When unsure, remember:
 - Protect architecture boundaries
 - Do not casually touch large files
 - Preserve runtime safety
-- Release readiness matters more than feature expansion right now
+- Post-SP-08 regression control and maintainability matter more than speculative expansion right now
 
 This repository is not in prototype mode.
-It is in stabilization and release-readiness mode.
+It is in post-release stabilization and next-workstream planning mode.

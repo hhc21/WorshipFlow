@@ -110,6 +110,23 @@
 - `freeTextTitle`
 - `keyText`
 - `cueLabel` (또는 순번 기반 fallback)
+- `memoShared`
+- `referenceLinks`
+- `musicMetadata` (optional nested map)
+
+`musicMetadata` schema:
+- `tempoBpm` (`int?`)
+- `timeSignature` (`String?`)
+- `sectionMarkers` (`List<String>?`)
+
+정책:
+- `musicMetadata`는 optional nested map이다.
+- fully empty metadata는 필드를 저장하지 않는다.
+- raw Firestore map은 parsing boundary 외부로 퍼뜨리지 않고 typed access 경계를 통과해야 한다.
+- direct raw map access는 parsing boundary 밖에서 금지한다.
+- typed access boundary는 `SetlistMusicMetadata`다.
+- malformed subfield는 defensive parse에 의해 필드 단위로 무시될 수 있다.
+- `keyText`는 계속 top-level canonical 필드다.
 
 ## 4. LiveCue 데이터 모델
 

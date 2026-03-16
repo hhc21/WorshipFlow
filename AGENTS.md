@@ -85,6 +85,28 @@ teams/{teamId}/userProjectNotes/{noteId}
 
 Agents must NOT introduce new parallel structures unless explicitly requested.
 
+## 4.1 Music Metadata System
+
+Setlist music metadata is stored as an optional nested map under:
+
+teams/{teamId}/projects/{projectId}/segmentA_setlist/{itemId}
+
+Schema boundary:
+- `SetlistMusicMetadata`
+
+Validation owner:
+- metadata validator layer
+
+LiveCue role:
+- read-only consumer only
+
+Rules:
+- LiveCue must not validate metadata
+- LiveCue must not write metadata
+- LiveCue must not duplicate metadata state
+- metadata formatting belongs to the render helper layer (`live_cue_render_support.dart`)
+- operator/fullscreen UI consumes prepared output only
+
 ---
 
 # 5. Current Development Stage
@@ -96,14 +118,16 @@ Current state summary:
 SP-01 App Foundation → complete  
 SP-02 LiveCue Sync Core → complete  
 SP-03 LiveCue Engine Separation → complete  
-SP-04 Runtime Stability → implementation complete, device validation pending  
+SP-04 Runtime Stability → complete (implementation + device validation docs PASS)  
 SP-05 Product Features → complete  
 SP-06 Runtime Guards → complete  
-SP-07 Release Gate → ready to execute
+SP-07 Release Gate → complete (historical close)  
+SP-08 Score Resolution & LiveCue Preview Performance → complete  
+SP-09 Music Metadata Layer → complete
 
 Current repository stage:
 
-**Pre-Release Validation**
+**Post-SP-09 Mainline / Pre-Deploy Baseline Refresh**
 
 ---
 
@@ -186,6 +210,9 @@ Runtime validation
 - runtime guard metrics
 - router validation
 - liveCue state integrity
+
+On current `main`, SP-07 is no longer the active stage.
+Treat release-gate material as historical baseline / audit reference unless the user explicitly asks to revisit release evidence.
 
 ---
 

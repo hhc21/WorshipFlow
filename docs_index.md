@@ -33,6 +33,11 @@
 - `livecue_protocol.md`  
   LiveCue 동기화 및 상태 해석 규약
 
+- SP-09 music metadata  
+  - schema / storage contract: `data_model.md`
+  - setlist edit integration / close status: `plan.md`, `research.md`
+  - LiveCue read-only consumption / rendering boundary: `livecue_protocol.md`
+
 ---
 
 # 2. Operations / Runbooks (docs)

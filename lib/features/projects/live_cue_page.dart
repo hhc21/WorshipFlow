@@ -20,6 +20,7 @@ import '../../utils/browser_helpers.dart';
 import '../../utils/song_parser.dart';
 import '../../utils/storage_helpers.dart';
 import 'live_cue_note_persistence_adapter.dart';
+import 'models/setlist_music_metadata.dart';
 import 'models/sketch_stroke.dart';
 import 'live_cue_stroke_engine.dart';
 import 'live_cue_sync_coordinator.dart';

@@ -12,6 +12,8 @@ import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
 import '../../utils/song_parser.dart';
 import 'live_cue_sync_coordinator.dart';
+import 'models/setlist_music_metadata.dart';
+import 'setlist_music_metadata_validator.dart';
 
 class SegmentAPage extends ConsumerStatefulWidget {
   final String teamId;
@@ -944,95 +946,217 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
   ) async {
     if (!widget.canEdit) return;
     final data = itemDoc.data();
-    var draftTitle = _displayTitleFromSetlistItem(data);
-    var draftKey = data['keyText']?.toString() ?? '';
-    var draftMemo = data['memoShared']?.toString() ?? '';
-    var draftCueLabel = (data['cueLabel'] ?? data['order'] ?? '').toString();
-    var draftLinks = ((data['referenceLinks'] as List?) ?? const []).join('\n');
-
-    final updated = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('콘티 수정'),
-        content: SizedBox(
-          width: 460,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextFormField(
-                  initialValue: draftCueLabel,
-                  onChanged: (value) => draftCueLabel = value,
-                  decoration: appInputDecoration(
-                    dialogContext,
-                    label: '순서 라벨 (예: 1, 1-2)',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  initialValue: draftTitle,
-                  onChanged: (value) => draftTitle = value,
-                  decoration: appInputDecoration(dialogContext, label: '제목'),
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  initialValue: draftKey,
-                  onChanged: (value) => draftKey = value,
-                  decoration: appInputDecoration(
-                    dialogContext,
-                    label: '키 (선택)',
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  initialValue: draftMemo,
-                  onChanged: (value) => draftMemo = value,
-                  decoration: appInputDecoration(dialogContext, label: '메모'),
-                ),
-                const SizedBox(height: 10),
-                TextFormField(
-                  initialValue: draftLinks,
-                  onChanged: (value) => draftLinks = value,
-                  minLines: 1,
-                  maxLines: 3,
-                  decoration: appInputDecoration(
-                    dialogContext,
-                    label: '레퍼런스 링크 (줄바꿈/쉼표 구분)',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('취소'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('저장'),
-          ),
-        ],
-      ),
+    final existingMetadata = SetlistMusicMetadata.fromUnknown(
+      data['musicMetadata'],
     );
-    if (updated != true) return;
+    final cueLabelController = TextEditingController(
+      text: (data['cueLabel'] ?? data['order'] ?? '').toString(),
+    );
+    final titleController = TextEditingController(
+      text: _displayTitleFromSetlistItem(data),
+    );
+    final keyController = TextEditingController(
+      text: data['keyText']?.toString() ?? '',
+    );
+    final memoController = TextEditingController(
+      text: data['memoShared']?.toString() ?? '',
+    );
+    final linksController = TextEditingController(
+      text: ((data['referenceLinks'] as List?) ?? const []).join('\n'),
+    );
+    final tempoController = TextEditingController(
+      text: existingMetadata.tempoBpm?.toString() ?? '',
+    );
+    final timeSignatureController = TextEditingController(
+      text: existingMetadata.timeSignature ?? '',
+    );
+    final sectionMarkersController = TextEditingController(
+      text: (existingMetadata.sectionMarkers ?? const <String>[]).join(', '),
+    );
+
+    final updated = await showDialog<_SetlistEditDialogResult>(
+      context: context,
+      builder: (dialogContext) {
+        String? tempoBpmError;
+        String? timeSignatureError;
+        String? sectionMarkersError;
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            title: const Text('콘티 수정'),
+            content: SizedBox(
+              width: 460,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextFormField(
+                      controller: cueLabelController,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '순서 라벨 (예: 1, 1-2)',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: titleController,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '제목',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: keyController,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '키 (선택)',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: memoController,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '메모',
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: linksController,
+                      minLines: 1,
+                      maxLines: 3,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '레퍼런스 링크 (줄바꿈/쉼표 구분)',
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        '음악 메타데이터',
+                        style: Theme.of(dialogContext).textTheme.titleSmall
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: tempoController,
+                      keyboardType: TextInputType.number,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '템포 BPM (선택)',
+                      ).copyWith(errorText: tempoBpmError),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: timeSignatureController,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '박자표 (선택, 예: 4/4)',
+                      ).copyWith(errorText: timeSignatureError),
+                    ),
+                    const SizedBox(height: 10),
+                    TextFormField(
+                      controller: sectionMarkersController,
+                      minLines: 1,
+                      maxLines: 4,
+                      decoration: appInputDecoration(
+                        dialogContext,
+                        label: '섹션 마커 (쉼표 구분, 선택)',
+                      ).copyWith(errorText: sectionMarkersError),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('취소'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  final metadataValidation = validateSetlistMusicMetadataInput(
+                    tempoBpmInput: tempoController.text,
+                    timeSignatureInput: timeSignatureController.text,
+                    sectionMarkersInput: sectionMarkersController.text,
+                  );
+                  if (!metadataValidation.isValid) {
+                    OpsMetrics.runtimeGuardTriggered(
+                      guard: 'setlist_metadata_invalid_write',
+                      fields: <String, Object?>{
+                        'teamId': widget.teamId,
+                        'projectId': widget.projectId,
+                        'itemId': itemDoc.id,
+                        'tempoInvalid':
+                            metadataValidation.tempoBpmError != null,
+                        'timeSignatureInvalid':
+                            metadataValidation.timeSignatureError != null,
+                        'sectionMarkersInvalid':
+                            metadataValidation.sectionMarkersError != null,
+                      },
+                    );
+                    setDialogState(() {
+                      tempoBpmError = metadataValidation.tempoBpmError;
+                      timeSignatureError =
+                          metadataValidation.timeSignatureError;
+                      sectionMarkersError =
+                          metadataValidation.sectionMarkersError;
+                    });
+                    return;
+                  }
+                  Navigator.of(dialogContext).pop(
+                    _SetlistEditDialogResult(
+                      cueLabel: cueLabelController.text,
+                      title: titleController.text,
+                      keyText: keyController.text,
+                      memo: memoController.text,
+                      referenceLinksText: linksController.text,
+                      metadata: metadataValidation.metadata,
+                    ),
+                  );
+                },
+                child: const Text('저장'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    await WidgetsBinding.instance.endOfFrame;
+    cueLabelController.dispose();
+    titleController.dispose();
+    keyController.dispose();
+    memoController.dispose();
+    linksController.dispose();
+    tempoController.dispose();
+    timeSignatureController.dispose();
+    sectionMarkersController.dispose();
+    if (updated == null) return;
 
     final firestore = ref.read(firestoreProvider);
-    final referenceLinks = _parseReferenceLinks(draftLinks);
-    final keyText = draftKey.trim();
-    final cueLabel = draftCueLabel.trim();
-    final nextTitle = draftTitle.trim();
+    final referenceLinks = _parseReferenceLinks(updated.referenceLinksText);
+    final keyText = updated.keyText.trim();
+    final cueLabel = updated.cueLabel.trim();
+    final nextTitle = updated.title.trim();
     final updates = <String, dynamic>{
       'cueLabel': cueLabel.isEmpty
           ? (data['order']?.toString() ?? '')
           : cueLabel,
       'displayTitle': nextTitle,
       'keyText': keyText.isEmpty ? null : normalizeKeyText(keyText),
-      'memoShared': draftMemo.trim(),
+      'memoShared': updated.memo.trim(),
     };
     if (data['songId'] == null) {
       updates['freeTextTitle'] = nextTitle;
+    }
+    if (updated.metadata.isEmpty) {
+      if (!existingMetadata.isEmpty) {
+        updates['musicMetadata'] = FieldValue.delete();
+      }
+    } else {
+      updates['musicMetadata'] = updated.metadata.toFirestore();
     }
     if (referenceLinks.isEmpty) {
       updates['referenceLinks'] = FieldValue.delete();
@@ -1480,4 +1604,22 @@ class _ResolvedSetlistSong {
       freeTextTitle = null,
       keyText = null,
       isValid = false;
+}
+
+class _SetlistEditDialogResult {
+  final String cueLabel;
+  final String title;
+  final String keyText;
+  final String memo;
+  final String referenceLinksText;
+  final SetlistMusicMetadata metadata;
+
+  const _SetlistEditDialogResult({
+    required this.cueLabel,
+    required this.title,
+    required this.keyText,
+    required this.memo,
+    required this.referenceLinksText,
+    required this.metadata,
+  });
 }

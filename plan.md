@@ -111,12 +111,13 @@
 
 ## 1.1 개발 단계
 현재 단계:
-**Post-SP-08 Mainline / Next Workstream Planning**
+**Post-SP-09 Mainline / Pre-Deploy Baseline Refresh**
 
 의미:
 - SP-07 Release Gate는 저장소 기준으로 historical close 상태다.
 - SP-08 score resolution / LiveCue preview stabilization 작업이 `main`에 반영되었다.
-- 현재 우선순위는 후속 workstream 계획과 유지보수 리스크 관리다.
+- SP-09 music metadata layer(phase 1/phase 2)가 코드 기준으로 완료되었다.
+- 현재 우선순위는 배포 전 기준선 정렬과 후속 workstream 계획 확정이다.
 
 ## 1.2 SP 상태 매트릭스
 | SP | 상태 | 현재 판정 |
@@ -136,16 +137,16 @@
 | SP-06 | 완료 | Runtime Guard + Observability |
 | SP-07 | 완료 | Release Gate historical close (`wf-v1.0.0` 이후 mainline 진행) |
 | SP-08 | 완료 | Score Resolution & LiveCue Preview Performance main 반영 |
-| SP-09 | 예정 | Music Metadata Layer |
-| SP-10 | 예정 | Performance Assistance Layer |
+| SP-09 | 완료 | Music Metadata Layer main 반영 완료 |
+| SP-10 | 예정 | Setlist Metadata Display Enhancements |
 | SP-11 | 예정 | Collaboration Layer |
 | SP-12 | 예정 | Production Ops Maturity |
 | SP-13 | 예정 | Score System Expansion |
 | SP-14 | 예정 | Community Song Contribution Pipeline |
 
 ## 1.3 현재 우선순위
-1. post-SP-08 runtime regression 관측
-2. maintainability hotspot 추적
+1. post-SP-09 regression 관측
+2. deploy baseline / 문서 기준선 정렬
 3. 다음 workstream 기준선 확정
 
 ---
@@ -717,178 +718,293 @@ DoD:
 
 # 12. SP-09 Music Metadata Layer (상세)
 
-상태: 예정
+상태: 완료  
+판정: **Phase 1 완료 / Phase 2 완료**
 
 ## 12.1 목표
-- setlist item 단위 음악 메타데이터를 구조화해 운영 품질 향상
-- LiveCue에서 read-only 소비 가능한 표준 메타 계약 확립
+- setlist item 단위 음악 메타데이터를 구조화해 운영 품질을 높인다.
+- typed metadata boundary를 통해 Firestore raw map이 앱 전역으로 퍼지지 않게 한다.
+- LiveCue가 이후 단계에서 metadata를 read-only로 소비할 수 있는 기반 계약을 확립한다.
 
-## 12.2 범위
-포함:
-- `segmentA_setlist/{itemId}` 메타 필드 확장
-- 운영자 편집 UI 입력/검증
-- LiveCue current/next 메타 read-only 노출
+## 12.2 현재 기준 데이터 계약
+canonical 경로:
+- `teams/{teamId}/projects/{projectId}/segmentA_setlist/{itemId}`
 
-비포함:
-- 자동 편곡/추천
-- 오디오 DSP/분석 엔진
+기존 top-level 필드 유지:
+- `order`
+- `songId`
+- `displayTitle`
+- `freeTextTitle`
+- `keyText`
+- `cueLabel`
+- `memoShared`
+- `referenceLinks`
 
-## 12.3 데이터 계약(초안)
-필수/권장 필드:
-- `tempoBpm` (int, 20~300)
-- `timeSignature` (string, 예: `4/4`, `3/4`, `6/8`)
-- `sectionMarkers` (list, optional)
-- `arrangementNote` (string, optional)
-- `keyText` (기존 규약 재사용)
+신규 optional nested map:
+- `musicMetadata`
 
-정합성 규칙:
-- 범위 외 값은 저장 차단
-- null 허용 필드와 미입력 필드를 구분
-- legacy 항목은 기본값 강제가 아니라 optional 소비
+Phase 1 schema:
+- `musicMetadata.tempoBpm` (`int?`, 20~300)
+- `musicMetadata.timeSignature` (`String?`, normalized `N/D`)
+- `musicMetadata.sectionMarkers` (`List<String>?`)
 
-## 12.4 Workstreams
-### WS-01 Metadata Contract Definition
-세부:
-- 필드 타입/범위/기본값/누락 정책 확정
-- 문서(`data_model.md`, `livecue_protocol.md`) 동기화
+typed access 원칙:
+- Firestore 저장 형태는 nested map이지만, 앱 내부 경계는 `SetlistMusicMetadata`가 소유한다.
+- raw `musicMetadata`는 `SetlistMusicMetadata.fromUnknown(...)` / `fromFirestore(...)` 경계를 통과한 뒤에만 사용한다.
+- `keyText`는 계속 top-level canonical 필드다.
+- `memoShared`는 phase 1에서 arrangement-note 유사 텍스트를 계속 담당한다.
+- fully empty metadata는 저장하지 않고 필드를 omit/delete 한다.
 
-DoD:
-- [ ] 메타 계약 표 확정
-- [ ] 저장/조회 경로에서 타입 드리프트 없음
+## 12.3 SP-09 Phase 1 완료 범위
+완료 항목:
+- [x] typed metadata boundary 구현
+- [x] validator / normalizer 분리
+- [x] 기존 setlist edit dialog에 metadata 입력 확장
+- [x] nested `musicMetadata` serialize / deserialize 반영
+- [x] malformed legacy metadata defensive parse
+- [x] empty metadata omission / delete 정책 반영
+- [x] unit/widget/regression test 반영
+- [x] `flutter analyze`
+- [x] `flutter test --reporter=compact`
+- [x] `bash scripts/ci/test_rules.sh`
 
-### WS-02 Admin Editing UX
-세부:
-- setlist 항목 편집 패널에 메타 입력 추가
-- 저장 전 validation + 오류 메시지 표준화
+Phase 1 산출물:
+- `SetlistMusicMetadata`
+- `setlist_music_metadata_validator.dart`
+- `segment_a_page.dart` edit dialog write path integration
 
-DoD:
-- [ ] invalid metadata 저장 차단
-- [ ] 오류 메시지 사용자 이해 가능 수준
+Phase 1 명시적 경계:
+- phase 1은 **setlist edit/write boundary까지만** 다룬다.
+- LiveCue operator/fullscreen render는 phase 2에서 read-only로 추가되며, phase 1은 write path까지만 책임진다.
+- backfill utility, metadata analytics, arrangementNote, create/bulk-create metadata 입력은 phase 1 범위가 아니다.
 
-### WS-03 LiveCue Consumption
-세부:
-- current/next 영역 read-only 표기
-- sync/input/render ownership 침범 금지
+## 12.4 SP-09 Phase 2 완료 범위 — LiveCue Metadata Rendering
 
-DoD:
-- [ ] 메타 표시는 가능, 엔진 소유권 침범 없음
+### 완료 항목
+- [x] LiveCue가 metadata를 read-only로 소비
+- [x] metadata render helper layer 도입
+- [x] operator view metadata display 반영
+- [x] fullscreen view metadata display 반영
+- [x] LiveCue schema/validation/state ownership 비보유 원칙 유지
+- [x] preview-first render path 비회귀 유지
 
-### WS-04 Legacy Compatibility + Backfill
-세부:
-- 메타 없는 기존 항목 호환
-- 선택적 backfill 유틸리티
+### 렌더링 위치
+적용 surface:
+- operator view
+- fullscreen view
 
-DoD:
-- [ ] 기존 데이터로 회귀 없음
-- [ ] backfill 실행 여부와 무관하게 앱 정상 동작
+반영 파일:
+- `lib/features/projects/live_cue_render_support.dart`
+- `lib/features/projects/live_cue_operator_sections.dart`
+- `lib/features/projects/live_cue_fullscreen_sections.dart`
 
-### WS-05 Observability
-세부:
-- metadata validation failure 로그
-- out-of-range 입력 빈도 추적
+### 데이터 플로우
+`segmentA_setlist` snapshot  
+↓  
+setlist item raw map  
+↓  
+`musicMetadata` 추출  
+↓  
+`SetlistMusicMetadata.fromUnknown(...)` / `fromFirestore(...)`  
+↓  
+typed metadata  
+↓  
+render helper formatting  
+↓  
+UI display
 
-DoD:
-- [ ] metadata 오류가 무음 실패되지 않음
+명시 규칙:
+- LiveCue는 raw `musicMetadata` map에 직접 접근하지 않는다.
+- LiveCue는 metadata를 `liveCue/state`에 복제하지 않는다.
+- metadata는 항상 setlist snapshot에서 파생한다.
 
-## 12.5 SP-09 DoD
-- [ ] metadata 저장/조회 구현
-- [ ] validation 정책 반영
-- [ ] LiveCue read-only 소비 반영
-- [ ] legacy 호환성 확인
-- [ ] 정적 검증 3종 통과
+### 소유권 경계
+- metadata schema owner: `SetlistMusicMetadata`
+- validation owner: metadata validator layer
+- LiveCue 역할: read-only consumer
+
+LiveCue가 하지 말아야 하는 일:
+- metadata validation
+- metadata persistence
+- metadata write-back
+- metadata duplicate state ownership
+
+### 렌더링 책임
+`live_cue_render_support.dart` 책임:
+- compact metadata summary 생성
+- tempo / timeSignature / sectionMarkers formatting
+- empty metadata 처리
+
+UI 계층 원칙:
+- operator/fullscreen UI는 metadata formatting 로직을 직접 소유하지 않는다.
+- UI는 render helper가 준 결과를 표시만 한다.
+- operator/fullscreen은 prepared display output만 소비한다.
+
+### 표시 규칙
+metadata 없음:
+- metadata block 숨김
+- placeholder text 추가 금지
+
+metadata 있음:
+- Tempo
+- Time Signature
+- Sections
+
+표시 예시:
+- `Tempo: 72 BPM`
+- `Time Signature: 4/4`
+- `Sections: Verse • Chorus • Bridge`
+
+### legacy 동작
+metadata 없음:
+- UI crash 없음
+- placeholder 강제 없음
+- metadata block 숨김
+
+malformed metadata:
+- `SetlistMusicMetadata` defensive parse 적용
+- invalid subfield는 무시
+- current/next render 전체는 계속 진행
+
+### 성능/구조 규칙
+- metadata는 preview/render critical path를 소유하지 않는다.
+- metadata는 sync coordinator에 duplicate state로 넣지 않는다.
+- metadata cache를 coordinator 외부에 별도 장기 상태로 두지 않는다.
+- current/next metadata는 setlist snapshot에서 즉시 파생한다.
+
+### out of scope
+- metadata editing 재확장
+- create flow metadata
+- bulk create metadata
+- metadata migration/backfill
+- metadata analytics / search
+- arrangementNote
+
+## 12.5 SP-09 전체 DoD
+- [x] metadata typed boundary 구현
+- [x] validation 정책 반영
+- [x] setlist edit/write integration 반영
+- [x] LiveCue read-only 소비 반영
+- [x] legacy 호환성 확인(phase 1 범위)
+- [x] 정적 검증 3종 통과
 
 ## 12.6 검증 포인트
 - setlist 재진입 시 metadata 유지
-- current/next 전환 시 metadata 일관성
+- malformed metadata가 edit flow를 깨지 않음
 - 잘못된 값 입력 시 저장 차단 + 안내 메시지
+- phase 2에서 current/next metadata render가 preview-first 동작을 방해하지 않음
+- `flutter analyze` PASS
+- `flutter test --reporter=compact` PASS
+- `bash scripts/ci/test_rules.sh` PASS
 
 ## 12.7 리스크
-- metadata 필드 확장으로 UI 복잡도 증가
-- 운영자 입력 품질 편차
+- metadata render를 LiveCue UI에 직접 흩뿌리면 formatting/ownership drift가 발생할 수 있음
+- fullscreen/operator parity가 깨지면 동일 metadata가 다른 방식으로 표시될 수 있음
+- metadata를 `liveCue/state`에 복제하면 drift/read amplification 리스크가 재발함
+
+## 12.8 SP-09 최종 경계 / 다음 후보 메모
+최종 경계:
+- metadata schema owner: `SetlistMusicMetadata`
+- validation owner: metadata validator layer
+- LiveCue 역할: read-only consumer only
+
+다음 후보 메모:
+- SP-10: Setlist Metadata Display Enhancements
+- 후속 capability: song subtitle / alias resolution
 
 ---
 
-# 13. SP-10 Performance Assistance Layer (상세)
+# 13. SP-10 Setlist Metadata Display Enhancements (상세)
 
 상태: 예정
 
 ## 13.1 목표
-- 라이브 운영 보조 기능(tempo/count-in/timer/scroll) 제공
-- 코어 sync/input 안정성 훼손 없이 보조 계층으로 구현
+- setlist와 LiveCue에서 song metadata의 가독성과 탐색성을 높인다.
+- SP-09 metadata contract를 표시 계층에 확장하되 ownership 경계를 유지한다.
+- richer musical context feature의 기반이 되는 표시 규칙을 먼저 정리한다.
 
 ## 13.2 범위
 포함:
-- tempo tap
-- count-in
-- cue timer
-- auto scroll assist
-- SP-09 metadata(`tempoBpm`, `timeSignature`) 기반 보조 기능 연동
+- setlist view metadata badges
+- operator quick readability 개선
+- LiveCue / setlist 간 metadata 표시 규칙 정렬
+- song subtitle / alias resolution future capability 메모 정리
 
 비포함:
-- MIDI 연동
-- 오디오 DSP
+- metadata write model 변경
+- alias canonical resolver 전면 재설계
 - LiveCue 코어 엔진 재설계
+- 협업/Presence 기능
 
 ## 13.3 Workstreams
-### WS-01 Tempo Tap Engine
+### WS-01 Metadata Badges in Setlist View
 세부:
-- 탭 간격 기반 BPM 계산
-- 이상치 제거/안정화 평균
-- setlist item `tempoBpm` 존재 시 초기 템포 기준값으로 연동
+- setlist row에서 metadata badge를 compact하게 표시
+- metadata 없음 시 badge 숨김
+- `tempoBpm`, `timeSignature`, `sectionMarkers` 표시 우선순위 정리
+- 표시 예시:
+  - `72 BPM | 4/4 | Verse • Chorus`
 
 DoD:
-- [ ] 느린/빠른 탭 입력에서 BPM 안정 출력
-- [ ] metadata 연동 시에도 수동 탭 보정 로직 충돌 없음
+- [ ] setlist row metadata badge 표시 규칙 확정
+- [ ] metadata 없음/부분존재 시 empty label 없이 표시
 
-### WS-02 Count-in Flow
+### WS-02 Operator Readability Improvement
 세부:
-- 시작/취소/재시작 상태 모델
-- 곡 전환/큐 이동과의 충돌 방지
+- 운영자가 곡 구조를 더 빨리 읽을 수 있게 compact summary 정리
+- setlist/current/next metadata 가독성 규칙 정렬
+- LiveCue ownership 경계 비침범 유지
 
 DoD:
-- [ ] count-in 상태 전이 deterministic
+- [ ] operator readability 개선안이 setlist/LiveCue 사이에서 일관됨
+- [ ] preview/sync/render critical path 회귀 없음
 
-### WS-03 Cue Timer
+### WS-03 Song Subtitle / Alias Resolution (Future Capability Note)
 세부:
-- 경과 시간 표시
-- pause/resume/reset
-- 재진입 시 정책(복원/초기화) 명시
+- possible song identity direction:
+  - `songId`
+  - `title` (canonical)
+  - `subtitle` (optional familiar subtitle)
+  - `aliases[]` (alternate lookup titles)
+- canonical identity rule:
+  - multiple user-facing titles may resolve to the same canonical `songId`
+  - canonical `title` remains the primary identity and default display baseline
+- 예시:
+  - 제목: `찬양의 열기`
+  - 부제: `마음의 예배`
+  - aliases: `마음의 예배`, `The Heart of Worship`
+- 검색 예시:
+  - 입력: `D 마음의 예배`
+  - resolved canonical display: `D 찬양의 열기`
+- alias lookup rule:
+  - alternate familiar titles may resolve to the canonical song
+  - example:
+    - input: `마음의 예배`
+    - resolved songId/title: `찬양의 열기`
+- phase 목적:
+  - full system 설계가 아니라 future capability를 plan에 기록
+  - canonical display / subtitle / alias 표기 방향만 고정
 
 DoD:
-- [ ] 타이머 상태가 전이 규칙대로 유지
-
-### WS-04 Auto Scroll Assist
-세부:
-- 속도 프리셋/사용자 커스텀
-- 사용자 수동 조작 시 즉시 중단
-- 장시간 세션 성능 영향 측정
-
-DoD:
-- [ ] auto scroll이 필기/입력과 충돌하지 않음
-
-### WS-05 Runtime/Observability Guard
-세부:
-- `assist_start/assist_stop/assist_error` 로그
-- 세션 메모리/리빌드 영향 관측
-
-DoD:
-- [ ] 보조 기능 장애가 운영 로그로 추적 가능
+- [ ] subtitle / alias future capability note가 plan에 기록됨
+- [ ] canonical title 우선 display 원칙이 문서화됨
 
 ## 13.4 SP-10 DoD
-- [ ] tempo tap/count-in/timer/scroll 기본 기능 동작
-- [ ] core sync/input 경계 침범 없음
-- [ ] 장시간 세션 성능 회귀 허용 범위 내
+- [ ] setlist metadata badge 방향 정리
+- [ ] operator quick readability 개선 범위 정리
+- [ ] subtitle / alias future capability 메모 반영
+- [ ] core ownership 경계 비침범
 - [ ] 정적 검증 3종 통과
 
 ## 13.5 검증 포인트
-- BPM 계산 일관성
-- `tempoBpm/timeSignature` metadata 반영 일관성
-- 곡 전환 중 보조 기능 상태 전이
-- 필기 중 auto scroll 충돌 여부
+- setlist metadata badge 표시 일관성
+- metadata 없음/부분존재 시 표시 규칙
+- operator quick readability 회귀 여부
+- subtitle / alias example 문구와 canonical display 정책 충돌 여부
 
 ## 13.6 리스크
-- 보조 기능 추가로 UI 복잡도 증가
-- timer/scroll 상태가 sync 이벤트와 경쟁할 수 있음
+- badge/display 규칙이 surface별로 분기되면 formatting drift가 생길 수 있음
+- subtitle/alias를 성급히 resolver layer로 밀어 넣으면 SP-08 resolver 안정성을 해칠 수 있음
 
 ---
 
@@ -1519,20 +1635,19 @@ Required checks:
 
 # 21. 다음 실행 순서 (실행형 로드맵)
 
-## 21.1 즉시 실행 (Post-SP-08)
-1. post-SP-08 runtime regression 샘플 수집
+## 21.1 즉시 실행 (Post-SP-09)
+1. post-SP-09 runtime regression 샘플 수집
 2. maintainability hotspot 추적 갱신
-3. 다음 workstream 기준선 확정
+3. deploy baseline / 문서 기준선 정렬 확인
 
-## 21.2 다음 착수 (SP-09+ 계획)
-1. metadata 계약 입력 범위 확정
+## 21.2 다음 착수 (Post-SP-09+ 계획)
+1. setlist display enrichment / metadata badges 범위 고정
 2. LiveCue attach/re-entry timing hardening 필요도 재판정
 3. legacy setlist sanitize/backfill 검증 케이스 유지
-4. SP-13/SP-14 의존 관계 정렬
+4. song subtitle / alias resolution 의존 관계 정렬
 
-## 21.3 중기 (SP-09~SP-14)
-- SP-09: metadata 계약 + 입력/검증
-- SP-10: performance assist 기능 계층
+## 21.3 중기 (SP-10~SP-14)
+- SP-10: Setlist Metadata Display Enhancements
 - SP-11: collaboration 계약/권한/동시성
 - SP-12: 운영 프로세스 성숙화
 - SP-13: score preview/resolution/discovery 확장

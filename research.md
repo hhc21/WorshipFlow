@@ -34,6 +34,27 @@
   - 운영자 팀 목록에서 팀 홈 진입 가능
   - global admin 기반 접근 허용 보강
 
+### 1.3 Post-SP-09 close note: music metadata layer 반영 상태
+
+현재 코드 기준 관찰:
+- `musicMetadata` nested map이 setlist item 문서 하위에 추가되었지만, setlist item 전체 ownership을 넓히지 않고 부분 typed boundary로 관리됨
+- `SetlistMusicMetadata`가 raw Firestore map spread를 줄이는 canonical metadata schema boundary로 동작함
+- metadata validator / normalizer가 UI와 LiveCue에서 분리된 순수 helper 계층에 위치함
+- setlist item edit dialog(`segment_a_page.dart`)에 metadata edit/write path가 통합됨
+- Firestore hygiene 규칙이 반영됨
+  - empty metadata는 omit/delete
+  - malformed legacy metadata는 defensive parse
+- LiveCue metadata rendering은 coordinator/state ownership을 건드리지 않고 render layer에서 read-only 소비로 추가됨
+- preview-first render path는 유지되었고 metadata는 snapshot render pass에서 파생됨
+- render helper layer가 metadata formatting 중복을 막아 operator/fullscreen parity를 유지함
+
+판정:
+- SP-09 구현은 현재 아키텍처 기대와 일치한다.
+- nested Firestore metadata map은 typed boundary를 통해 관리되어 raw map spread를 줄였다.
+- validator 분리로 UI와 LiveCue가 schema/validation logic을 직접 소유하지 않는다.
+- LiveCue metadata rendering은 render layer에 국한되어 sync/state ownership 경계를 유지한다.
+- legacy compatibility는 phase 1/phase 2 모두 유지되었다.
+
 ## 2. Architecture Audit (현재 구현 구조)
 
 ### 2.1 런타임 축

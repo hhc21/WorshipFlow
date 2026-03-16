@@ -180,9 +180,22 @@ Widget _buildLiveCueOperatorPage(
                     final currentTitle = syncState.currentTitle;
                     final currentKey = syncState.currentKey;
                     final currentLabel = syncState.currentLabel;
+                    final currentMetadataSummary = _buildMetadataSummary(
+                      _extractMetadataFromItem(
+                        syncState.matchedCurrentSetlistData,
+                      ),
+                    );
                     final nextTitle = syncState.nextTitle;
                     final nextKey = syncState.nextKey;
                     final nextLabel = syncState.nextLabel;
+                    final nextMetadataSummary = _buildMetadataSummary(
+                      _extractMetadataFromItem(
+                        syncState.nextIndex >= 0 &&
+                                syncState.nextIndex < items.length
+                            ? items[syncState.nextIndex].data()
+                            : null,
+                      ),
+                    );
 
                     return GestureDetector(
                       behavior: HitTestBehavior.opaque,
@@ -216,16 +229,32 @@ Widget _buildLiveCueOperatorPage(
                                         .primaryContainer
                                         .withValues(alpha: 0.34),
                                   ),
-                                  child: Text(
-                                    _lineText(
-                                      label: currentLabel,
-                                      title: currentTitle,
-                                      keyText: currentKey,
-                                    ),
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleLarge
-                                        ?.copyWith(fontWeight: FontWeight.w800),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        _lineText(
+                                          label: currentLabel,
+                                          title: currentTitle,
+                                          keyText: currentKey,
+                                        ),
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleLarge
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                      ),
+                                      if (currentMetadataSummary
+                                          .hasMetadata) ...[
+                                        const SizedBox(height: 8),
+                                        _buildLiveCueOperatorMetadataBlock(
+                                          context,
+                                          currentMetadataSummary,
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
                                 const SizedBox(height: 8),
@@ -239,15 +268,28 @@ Widget _buildLiveCueOperatorPage(
                                         .surfaceContainerHighest
                                         .withValues(alpha: 0.46),
                                   ),
-                                  child: Text(
-                                    _lineText(
-                                      label: nextLabel,
-                                      title: nextTitle,
-                                      keyText: nextKey,
-                                    ),
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodyLarge,
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        _lineText(
+                                          label: nextLabel,
+                                          title: nextTitle,
+                                          keyText: nextKey,
+                                        ),
+                                        style: Theme.of(
+                                          context,
+                                        ).textTheme.bodyLarge,
+                                      ),
+                                      if (nextMetadataSummary.hasMetadata) ...[
+                                        const SizedBox(height: 6),
+                                        _buildLiveCueOperatorMetadataBlock(
+                                          context,
+                                          nextMetadataSummary,
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
                                 const SizedBox(height: 10),

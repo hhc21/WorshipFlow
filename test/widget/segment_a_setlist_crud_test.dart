@@ -59,6 +59,20 @@ void main() {
     );
   }
 
+  Finder dialogFieldByLabel(WidgetTester _, String label) {
+    final dialogFields = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is TextField && widget.decoration?.labelText == label,
+      ),
+    );
+    if (dialogFields.evaluate().isNotEmpty) {
+      return dialogFields.first;
+    }
+    return find.byWidgetPredicate((_) => false);
+  }
+
   testWidgets('setlist loads existing item from canonical path', (
     tester,
   ) async {
@@ -134,13 +148,21 @@ void main() {
 
     await tester.tap(find.byTooltip('수정').first);
     await tester.pumpAndSettle();
-    final dialogFields = find.descendant(
-      of: find.byType(AlertDialog),
-      matching: find.byType(TextFormField),
+    await tester.enterText(
+      dialogFieldByLabel(tester, '순서 라벨 (예: 1, 1-2)'),
+      '2',
     );
-    await tester.enterText(dialogFields.at(0), '2');
-    await tester.enterText(dialogFields.at(1), '수정곡');
-    await tester.enterText(dialogFields.at(2), 'E');
+    await tester.enterText(dialogFieldByLabel(tester, '제목'), '수정곡');
+    await tester.enterText(dialogFieldByLabel(tester, '키 (선택)'), 'E');
+    await tester.enterText(dialogFieldByLabel(tester, '템포 BPM (선택)'), '128');
+    await tester.enterText(
+      dialogFieldByLabel(tester, '박자표 (선택, 예: 4/4)'),
+      ' 6 / 8 ',
+    );
+    await tester.enterText(
+      dialogFieldByLabel(tester, '섹션 마커 (쉼표 구분, 선택)'),
+      'Intro, Verse',
+    );
     await tester.tap(find.widgetWithText(ElevatedButton, '저장'));
     await tester.pumpAndSettle();
 
@@ -148,6 +170,11 @@ void main() {
     expect(editedDoc.data()?['cueLabel'], '2');
     expect(editedDoc.data()?['displayTitle'], '수정곡');
     expect(editedDoc.data()?['keyText'], 'E');
+    expect(editedDoc.data()?['musicMetadata'], {
+      'tempoBpm': 128,
+      'timeSignature': '6/8',
+      'sectionMarkers': ['Intro', 'Verse'],
+    });
 
     await tester.tap(find.byTooltip('삭제').first);
     await tester.pumpAndSettle();
@@ -249,4 +276,84 @@ void main() {
       expect(reordered.docs.map((doc) => doc.id).toList(), ['b', 'a', 'c']);
     },
   );
+
+  testWidgets('invalid metadata blocks save in the edit dialog', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('item-1')
+        .set({
+          'order': 1,
+          'cueLabel': '1',
+          'displayTitle': '메타곡',
+          'freeTextTitle': '메타곡',
+          'keyText': 'C',
+        });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    await tester.tap(find.byTooltip('수정').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(dialogFieldByLabel(tester, '템포 BPM (선택)'), '500');
+    await tester.tap(find.widgetWithText(ElevatedButton, '저장'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.textContaining('20~300'), findsOneWidget);
+
+    final doc = await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('item-1')
+        .get();
+    expect(doc.data()?['musicMetadata'], isNull);
+  });
+
+  testWidgets('empty metadata input does not create noisy musicMetadata', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('item-1')
+        .set({
+          'order': 1,
+          'cueLabel': '1',
+          'displayTitle': '기존곡',
+          'freeTextTitle': '기존곡',
+          'keyText': 'D',
+        });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    await tester.tap(find.byTooltip('수정').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ElevatedButton, '저장'));
+    await tester.pumpAndSettle();
+
+    final doc = await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('item-1')
+        .get();
+    expect(doc.data()?['musicMetadata'], isNull);
+  });
 }

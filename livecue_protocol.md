@@ -33,6 +33,10 @@
 
 해석에 쓰는 주요 필드:
 - `order`, `songId`, `displayTitle`, `freeTextTitle`, `keyText`, `cueLabel`
+- optional metadata:
+  - `musicMetadata.tempoBpm`
+  - `musicMetadata.timeSignature`
+  - `musicMetadata.sectionMarkers`
 
 ### 2.3 노트/필기 레이어
 
@@ -58,6 +62,34 @@
 - 웹: polling 전환 시 generation 증가 + cancel 후 재attach
 - 비웹: native snapshot stream 단일화
 - emission sequence trace를 기록해 역전/충돌을 탐지
+
+### 3.3 LiveCue metadata consumption
+
+LiveCue metadata source:
+- `segmentA_setlist/{itemId}`의 optional nested `musicMetadata`
+
+규칙:
+- LiveCue는 metadata를 `SetlistMusicMetadata` typed boundary를 통해서만 읽는다.
+- LiveCue는 raw `musicMetadata` map에 직접 접근하지 않는다.
+- LiveCue는 metadata를 validate하지 않는다.
+- LiveCue는 metadata를 write하지 않는다.
+- LiveCue는 metadata를 `liveCue/state`에 복제하지 않는다.
+- LiveCue는 metadata를 coordinator/state/provider 장기 상태로 저장하지 않는다.
+
+현재/다음 metadata는:
+- setlist snapshot에서 current/next item을 해석한 뒤
+- 각 item의 `musicMetadata`를 typed model로 파싱해
+- render helper formatting을 거쳐
+- operator/fullscreen UI의 prepared display output으로만 사용한다.
+
+렌더링 책임:
+- metadata formatting은 render helper logic(`live_cue_render_support.dart`)이 담당한다.
+- operator/fullscreen UI는 formatting 규칙을 직접 소유하지 않는다.
+- metadata는 snapshot render pass에서 즉시 파생하며 preview-first pipeline은 변경하지 않는다.
+
+legacy/malformed 데이터:
+- metadata 없음: metadata UI 숨김
+- malformed metadata: defensive parse로 invalid subfield만 무시
 
 ## 4. 상태 소유권 규약 (현재 구현)
 

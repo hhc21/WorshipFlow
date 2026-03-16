@@ -159,6 +159,115 @@ Future<_LiveCueAssetPreview?> _loadCurrentPreview(
 
 const int _liveCuePreviewHeadLimit = 6;
 
+class _LiveCueMetadataSummary {
+  final String? tempoText;
+  final String? timeSignatureText;
+  final String? sectionsText;
+
+  const _LiveCueMetadataSummary({
+    this.tempoText,
+    this.timeSignatureText,
+    this.sectionsText,
+  });
+
+  bool get hasMetadata =>
+      (tempoText != null && tempoText!.isNotEmpty) ||
+      (timeSignatureText != null && timeSignatureText!.isNotEmpty) ||
+      (sectionsText != null && sectionsText!.isNotEmpty);
+}
+
+SetlistMusicMetadata? _extractMetadataFromItem(Map<String, dynamic>? item) {
+  if (item == null || item.isEmpty) return null;
+  final raw = item['musicMetadata'];
+  if (raw == null) return null;
+  final metadata = SetlistMusicMetadata.fromUnknown(raw);
+  return metadata.isEmpty ? null : metadata;
+}
+
+String? _formatTempo(int? tempoBpm) {
+  if (tempoBpm == null) return null;
+  return '$tempoBpm BPM';
+}
+
+String? _formatTimeSignature(String? timeSignature) {
+  final value = timeSignature?.trim();
+  if (value == null || value.isEmpty) return null;
+  return value;
+}
+
+String? _formatSections(List<String>? sections) {
+  if (sections == null || sections.isEmpty) return null;
+  final normalized = sections
+      .map((section) => section.trim())
+      .where((section) => section.isNotEmpty)
+      .toList(growable: false);
+  if (normalized.isEmpty) return null;
+  return normalized.join(' • ');
+}
+
+_LiveCueMetadataSummary _buildMetadataSummary(SetlistMusicMetadata? metadata) {
+  if (metadata == null || metadata.isEmpty) {
+    return const _LiveCueMetadataSummary();
+  }
+  return _LiveCueMetadataSummary(
+    tempoText: _formatTempo(metadata.tempoBpm),
+    timeSignatureText: _formatTimeSignature(metadata.timeSignature),
+    sectionsText: _formatSections(metadata.sectionMarkers),
+  );
+}
+
+Widget _buildLiveCueOperatorMetadataBlock(
+  BuildContext context,
+  _LiveCueMetadataSummary summary,
+) {
+  if (!summary.hasMetadata) return const SizedBox.shrink();
+  final textStyle = Theme.of(
+    context,
+  ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600);
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      if (summary.tempoText != null)
+        Text('Tempo: ${summary.tempoText}', style: textStyle),
+      if (summary.timeSignatureText != null)
+        Text('Time Signature: ${summary.timeSignatureText}', style: textStyle),
+      if (summary.sectionsText != null)
+        Text('Sections: ${summary.sectionsText}', style: textStyle),
+    ],
+  );
+}
+
+Widget _buildLiveCueFullscreenMetadataBlock(_LiveCueMetadataSummary summary) {
+  if (!summary.hasMetadata) return const SizedBox.shrink();
+  final primaryParts = <String>[
+    if (summary.tempoText != null) summary.tempoText!,
+    if (summary.timeSignatureText != null) summary.timeSignatureText!,
+  ];
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      if (primaryParts.isNotEmpty)
+        Text(
+          primaryParts.join(' • '),
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      if (summary.sectionsText != null)
+        Text(
+          summary.sectionsText!,
+          style: const TextStyle(
+            color: Colors.white60,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+    ],
+  );
+}
+
 class _LiveCuePreviewAssetQueryResult {
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
   final int elapsedMs;

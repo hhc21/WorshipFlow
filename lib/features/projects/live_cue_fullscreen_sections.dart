@@ -506,6 +506,11 @@ Widget _buildLiveCueFullScreenPage(
                     final currentLabel = syncState.currentLabel;
                     final currentTitle = syncState.currentTitle;
                     final currentKey = syncState.currentKey;
+                    final currentMetadataSummary = _buildMetadataSummary(
+                      _extractMetadataFromItem(
+                        syncState.matchedCurrentSetlistData,
+                      ),
+                    );
                     final currentPreviewTitle =
                         syncState.setlistCurrentTitle.isNotEmpty
                         ? syncState.setlistCurrentTitle
@@ -519,8 +524,17 @@ Widget _buildLiveCueFullScreenPage(
                       currentPreviewCacheKey,
                     );
                     final nextSongId = cueData['nextSongId']?.toString();
+                    final nextLabel = syncState.nextLabel;
                     final nextKey = syncState.nextKey;
                     final nextTitle = syncState.nextTitle;
+                    final nextMetadataSummary = _buildMetadataSummary(
+                      _extractMetadataFromItem(
+                        syncState.nextIndex >= 0 &&
+                                syncState.nextIndex < items.length
+                            ? items[syncState.nextIndex].data()
+                            : null,
+                      ),
+                    );
 
                     String? prevSongId;
                     String? prevKey;
@@ -1355,6 +1369,38 @@ Widget _buildLiveCueFullScreenPage(
                                                           FontWeight.w700,
                                                     ),
                                                   ),
+                                                  if (currentMetadataSummary
+                                                      .hasMetadata) ...[
+                                                    const SizedBox(height: 6),
+                                                    _buildLiveCueFullscreenMetadataBlock(
+                                                      currentMetadataSummary,
+                                                    ),
+                                                  ],
+                                                  if (nextTitle.isNotEmpty &&
+                                                      nextTitle !=
+                                                          '다음 곡 없음') ...[
+                                                    const SizedBox(height: 10),
+                                                    Text(
+                                                      _lineText(
+                                                        label: nextLabel,
+                                                        title: nextTitle,
+                                                        keyText: nextKey,
+                                                      ),
+                                                      style: const TextStyle(
+                                                        color: Colors.white70,
+                                                        fontSize: 13,
+                                                        fontWeight:
+                                                            FontWeight.w600,
+                                                      ),
+                                                    ),
+                                                    if (nextMetadataSummary
+                                                        .hasMetadata) ...[
+                                                      const SizedBox(height: 4),
+                                                      _buildLiveCueFullscreenMetadataBlock(
+                                                        nextMetadataSummary,
+                                                      ),
+                                                    ],
+                                                  ],
                                                   if (currentSongId != null &&
                                                       currentSongId.isNotEmpty)
                                                     FutureBuilder<List<String>>(
