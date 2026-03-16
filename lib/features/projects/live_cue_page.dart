@@ -385,6 +385,8 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   bool _syncReadyMetricEmitted = false;
   bool _bootstrapPreviewLoading = false;
   bool _bootstrapPreviewReady = false;
+  bool _bootstrapPreviewVisible = false;
+  bool _bootstrapViewerReady = false;
   bool _firstPreviewBeforeSyncMetricEmitted = false;
   String? _bootstrapPreviewScopeKey;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _bootstrapSetlist =
@@ -797,8 +799,11 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     required Map<String, dynamic> cueData,
   }) {
     if (items.isEmpty) return false;
-    if (items.length == 1) return true;
-    return _hasCueValue(cueData, 'current');
+    if (_hasCueValue(cueData, 'current')) return true;
+    final firstItem = items.first.data();
+    final firstSongId = firstItem['songId']?.toString().trim() ?? '';
+    final firstTitle = _titleFromItem(firstItem).trim();
+    return firstSongId.isNotEmpty || firstTitle.isNotEmpty;
   }
 
   void _ensureBootstrapPreviewSeed(FirebaseFirestore firestore) {
@@ -978,6 +983,20 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     _overlayRevision.value = _overlayRevision.value + 1;
   }
 
+  void _requestBootstrapStateRefresh() {
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  bool get _shouldDismissBootstrapBanner =>
+      _bootstrapPreviewReady ||
+      _bootstrapPreviewVisible ||
+      _bootstrapViewerReady ||
+      _syncReadyMetricEmitted;
+
   void _requestRenderPresenterRebuild() {
     if (!mounted) return;
     _markViewerNeedsBuild();
@@ -990,6 +1009,10 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   ) {
     if (_lastVisiblePreviewMetricKey == previewMetricKey) return;
     _lastVisiblePreviewMetricKey = previewMetricKey;
+    if (!_bootstrapPreviewVisible) {
+      _bootstrapPreviewVisible = true;
+      _requestBootstrapStateRefresh();
+    }
     final visibleLagMs =
         DateTime.now().millisecondsSinceEpoch - preview.selectedAtEpochMs;
     OpsMetrics.emit(
@@ -1017,6 +1040,10 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   }) {
     if (_viewerReadyMetricKeys.contains(viewerMetricKey)) return;
     _viewerReadyMetricKeys.add(viewerMetricKey);
+    if (!_bootstrapViewerReady) {
+      _bootstrapViewerReady = true;
+      _requestBootstrapStateRefresh();
+    }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     OpsMetrics.emit(
       'livecue_viewer_ready',

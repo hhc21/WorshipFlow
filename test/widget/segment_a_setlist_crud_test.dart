@@ -190,6 +190,49 @@ void main() {
     expect(cueAfterDelete.data()?['currentCueLabel'], isNull);
   });
 
+  testWidgets('bulk setlist input adds multiple items from textarea', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore.collection('songs').doc('song-1').set({
+      'title': '당신의 날에',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['당신의 날에'],
+    });
+    await firestore.collection('songs').doc('song-2').set({
+      'title': '새로운 생명',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['새로운 생명'],
+    });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    await tester.enterText(
+      fieldByLabel('콘티 일괄 입력 (여러 줄)'),
+      '1 Db 당신의 날에\n2 Ab 새로운 생명',
+    );
+    await tester.tap(find.text('일괄 추가').first);
+    await tester.pumpAndSettle();
+
+    final snapshot = await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .orderBy('order')
+        .get();
+
+    expect(snapshot.docs, hasLength(2));
+    expect(snapshot.docs[0].data()['cueLabel'], '1');
+    expect(snapshot.docs[0].data()['displayTitle'], '당신의 날에');
+    expect(snapshot.docs[0].data()['keyText'], 'Db');
+    expect(snapshot.docs[1].data()['cueLabel'], '2');
+    expect(snapshot.docs[1].data()['displayTitle'], '새로운 생명');
+    expect(snapshot.docs[1].data()['keyText'], 'Ab');
+  });
+
   testWidgets(
     'setlist reorder keeps order deterministic and cue move updates current/next',
     (tester) async {
