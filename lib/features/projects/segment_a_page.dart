@@ -644,27 +644,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
       return const _ResolvedSetlistSong.invalid();
     }
 
-    final normalizedTitle = normalizeQuery(parsed.title);
-    final candidates = await resolveSongCandidates(
+    final matched = await resolvePrimarySongCandidate(
       firestore,
       songId: null,
       rawTitle: parsed.title,
       keyText: parsed.keyText,
       teamId: widget.teamId,
     );
-    SongCandidate? matched;
-    if (candidates.length == 1) {
-      matched = candidates.first;
-    } else if (candidates.length > 1) {
-      final exactMatches = candidates
-          .where(
-            (candidate) => normalizeQuery(candidate.title) == normalizedTitle,
-          )
-          .toList();
-      if (exactMatches.length == 1) {
-        matched = exactMatches.first;
-      }
-    }
 
     final normalizedKey = parsed.keyText == null
         ? null

@@ -14,6 +14,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/ui_components.dart';
 import '../../core/ops/ops_metrics.dart';
 import '../../core/roles.dart';
+import '../../core/runtime/runtime_guard.dart';
 import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
 import '../../utils/browser_helpers.dart';
@@ -58,6 +59,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
   Map<String, dynamic> _latestCueData = const <String, dynamic>{};
   bool _autoSeeding = false;
   bool _saving = false;
+  bool _setlistMutationInFlight = false;
   Timer? _cueWaitingTimer;
   DateTime? _cueWaitingSince;
   bool _cueAutoRetryAttempted = false;
@@ -305,6 +307,210 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
     }
   }
 
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadSetlist(
+    FirebaseFirestore firestore,
+  ) async {
+    final snapshot = await _setlistRefFor(
+      firestore,
+      widget.teamId,
+      widget.projectId,
+    ).orderBy('order').get();
+    return snapshot.docs;
+  }
+
+  Future<void> _syncLiveCueAfterSetlistMutation(
+    FirebaseFirestore firestore,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> setlistItems, {
+    required String source,
+  }) async {
+    final liveCueRef = _liveCueRefFor(
+      firestore,
+      widget.teamId,
+      widget.projectId,
+    );
+    if (setlistItems.isEmpty) {
+      OpsMetrics.runtimeGuardTriggered(
+        guard: 'setlist_empty_clear_livecue_state',
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'source': source,
+        },
+      );
+      await liveCueRef.set({
+        ..._clearCueFields(prefix: 'current'),
+        ..._clearCueFields(prefix: 'next'),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      return;
+    }
+
+    final cueSnapshot = await liveCueRef.get();
+    final cueData = RuntimeGuard.snapshotDataOrEmpty(
+      cueSnapshot,
+      path: 'teams/${widget.teamId}/projects/${widget.projectId}/liveCue/state',
+      fields: <String, Object?>{
+        'teamId': widget.teamId,
+        'projectId': widget.projectId,
+        'source': source,
+      },
+    );
+    final resolvedCurrentIndex = LiveCueResolvedState.findCurrentIndex(
+      items: setlistItems,
+      cueData: cueData,
+      cueLabelFromItem: _cueLabelFromItem,
+      normalizeKeyText: normalizeKeyText,
+    );
+    final stateValidation = RuntimeGuard.validateLiveCueState(
+      cueData: cueData,
+      setlistLength: setlistItems.length,
+      resolvedCurrentIndex: resolvedCurrentIndex,
+    );
+    final currentIndex = stateValidation.requiresFallback
+        ? stateValidation.fallbackCurrentIndex
+        : resolvedCurrentIndex;
+    if (stateValidation.requiresFallback) {
+      OpsMetrics.liveCueStateInvalid(
+        fields: <String, Object?>{
+          'teamId': widget.teamId,
+          'projectId': widget.projectId,
+          'hasCurrent': stateValidation.hasCurrent,
+          'hasNext': stateValidation.hasNext,
+          'currentIndexInRange': stateValidation.currentIndexInRange,
+          'nextIndexInRange': stateValidation.nextIndexInRange,
+          'setlistLength': setlistItems.length,
+          'resolvedCurrentIndex': resolvedCurrentIndex,
+          'fallbackCurrentIndex': stateValidation.fallbackCurrentIndex,
+          'source': source,
+        },
+      );
+    }
+
+    final updates = <String, dynamic>{
+      ...await _cueFieldsFromSetlist(
+        firestore,
+        setlistItems[currentIndex].data(),
+        prefix: 'current',
+        teamId: widget.teamId,
+      ),
+    };
+    if (currentIndex + 1 < setlistItems.length) {
+      updates.addAll(
+        await _cueFieldsFromSetlist(
+          firestore,
+          setlistItems[currentIndex + 1].data(),
+          prefix: 'next',
+          teamId: widget.teamId,
+        ),
+      );
+    } else {
+      updates.addAll(_clearCueFields(prefix: 'next'));
+    }
+    updates['updatedAt'] = FieldValue.serverTimestamp();
+    await liveCueRef.set(updates, SetOptions(merge: true));
+  }
+
+  Future<void> _reorderSetlistItem(
+    FirebaseFirestore firestore,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> items, {
+    required int oldIndex,
+    required int newIndex,
+  }) async {
+    if (!widget.canEdit || _setlistMutationInFlight) return;
+    if (oldIndex < 0 ||
+        oldIndex >= items.length ||
+        newIndex < 0 ||
+        newIndex >= items.length ||
+        oldIndex == newIndex) {
+      return;
+    }
+
+    final reordered = [...items];
+    final moved = reordered.removeAt(oldIndex);
+    reordered.insert(newIndex, moved);
+
+    setState(() => _setlistMutationInFlight = true);
+    try {
+      final batch = firestore.batch();
+      for (var i = 0; i < reordered.length; i++) {
+        batch.update(reordered[i].reference, {'order': i + 1});
+      }
+      await batch.commit();
+
+      final refreshed = await _loadSetlist(firestore);
+      final validation = RuntimeGuard.validateSetlistOrder(
+        refreshed.map((doc) => doc.data()),
+      );
+      if (!validation.isValid) {
+        OpsMetrics.runtimeGuardTriggered(
+          guard: 'setlist_integrity_after_reorder',
+          fields: <String, Object?>{
+            'teamId': widget.teamId,
+            'projectId': widget.projectId,
+            'missingOrders': validation.missingOrders.join(','),
+            'duplicateOrders': validation.duplicateOrders.join(','),
+            'invalidOrderCount': validation.invalidOrderCount,
+            'source': 'livecue_operator',
+          },
+        );
+      }
+      await _syncLiveCueAfterSetlistMutation(
+        firestore,
+        refreshed,
+        source: 'livecue_operator_reorder',
+      );
+      if (!mounted) return;
+      setState(() {});
+    } finally {
+      if (mounted) {
+        setState(() => _setlistMutationInFlight = false);
+      }
+    }
+  }
+
+  Future<void> _deleteSetlistItem(
+    BuildContext context,
+    FirebaseFirestore firestore,
+    QueryDocumentSnapshot<Map<String, dynamic>> itemDoc,
+  ) async {
+    if (!widget.canEdit || _setlistMutationInFlight) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('콘티 삭제'),
+        content: const Text('이 콘티 항목을 삭제할까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _setlistMutationInFlight = true);
+    try {
+      await itemDoc.reference.delete();
+      final refreshed = await _loadSetlist(firestore);
+      await _syncLiveCueAfterSetlistMutation(
+        firestore,
+        refreshed,
+        source: 'livecue_operator_delete',
+      );
+      if (!mounted) return;
+      setState(() {});
+    } finally {
+      if (mounted) {
+        setState(() => _setlistMutationInFlight = false);
+      }
+    }
+  }
+
   void _requestPageRebuild() {
     if (!mounted) return;
     setState(() {});
@@ -385,6 +591,8 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   bool _syncReadyMetricEmitted = false;
   bool _bootstrapPreviewLoading = false;
   bool _bootstrapPreviewReady = false;
+  bool _bootstrapPreviewVisible = false;
+  bool _bootstrapViewerReady = false;
   bool _firstPreviewBeforeSyncMetricEmitted = false;
   String? _bootstrapPreviewScopeKey;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _bootstrapSetlist =
@@ -797,8 +1005,11 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     required Map<String, dynamic> cueData,
   }) {
     if (items.isEmpty) return false;
-    if (items.length == 1) return true;
-    return _hasCueValue(cueData, 'current');
+    if (_hasCueValue(cueData, 'current')) return true;
+    final firstItem = items.first.data();
+    final firstSongId = firstItem['songId']?.toString().trim() ?? '';
+    final firstTitle = _titleFromItem(firstItem).trim();
+    return firstSongId.isNotEmpty || firstTitle.isNotEmpty;
   }
 
   void _ensureBootstrapPreviewSeed(FirebaseFirestore firestore) {
@@ -978,6 +1189,20 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     _overlayRevision.value = _overlayRevision.value + 1;
   }
 
+  void _requestBootstrapStateRefresh() {
+    if (!mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {});
+    });
+  }
+
+  bool get _shouldDismissBootstrapBanner =>
+      _bootstrapPreviewReady ||
+      _bootstrapPreviewVisible ||
+      _bootstrapViewerReady ||
+      _syncReadyMetricEmitted;
+
   void _requestRenderPresenterRebuild() {
     if (!mounted) return;
     _markViewerNeedsBuild();
@@ -990,6 +1215,10 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   ) {
     if (_lastVisiblePreviewMetricKey == previewMetricKey) return;
     _lastVisiblePreviewMetricKey = previewMetricKey;
+    if (!_bootstrapPreviewVisible) {
+      _bootstrapPreviewVisible = true;
+      _requestBootstrapStateRefresh();
+    }
     final visibleLagMs =
         DateTime.now().millisecondsSinceEpoch - preview.selectedAtEpochMs;
     OpsMetrics.emit(
@@ -1017,6 +1246,10 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   }) {
     if (_viewerReadyMetricKeys.contains(viewerMetricKey)) return;
     _viewerReadyMetricKeys.add(viewerMetricKey);
+    if (!_bootstrapViewerReady) {
+      _bootstrapViewerReady = true;
+      _requestBootstrapStateRefresh();
+    }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     OpsMetrics.emit(
       'livecue_viewer_ready',
@@ -1179,8 +1412,11 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     if (shouldResetHtmlFallback) {
       // Prefer canvas-backed renderer while drawing to keep pointer events stable.
       _renderPresenter.resetHtmlImageFallback();
-      _markViewerNeedsBuild();
     }
+    if (mounted) {
+      setState(() {});
+    }
+    _markViewerNeedsBuild();
     _markOverlayNeedsBuild();
     if (value) {
       _renderPresenter.cancelOverlayAutoHide();
@@ -1192,11 +1428,21 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   void _setEraserEnabled(bool value) {
     if (_eraserEnabled == value) return;
     _strokeEngine.setEraserEnabled(value);
+    if (mounted) {
+      setState(() {});
+    }
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
   }
 
   void _setEditingSharedLayer(bool value) {
     if (_editingSharedLayer == value) return;
     _strokeEngine.setEditingSharedLayer(value);
+    if (mounted) {
+      setState(() {});
+    }
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
   }
 
   void _setLayerVisibility({bool? showPrivateLayer, bool? showSharedLayer}) {
@@ -1204,16 +1450,31 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
       showPrivateLayer: showPrivateLayer,
       showSharedLayer: showSharedLayer,
     );
+    if (mounted) {
+      setState(() {});
+    }
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
   }
 
   void _setDrawingColorValue(int colorValue) {
     if (_drawingColorValue == colorValue) return;
     _strokeEngine.setBrush(colorValue: colorValue);
+    if (mounted) {
+      setState(() {});
+    }
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
   }
 
   void _setDrawingStrokeWidth(double strokeWidth) {
     if ((_drawingStrokeWidth - strokeWidth).abs() < 0.05) return;
     _strokeEngine.setBrush(strokeWidth: strokeWidth);
+    if (mounted) {
+      setState(() {});
+    }
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
   }
 
   void _toggleDrawingToolPanel() {
@@ -1222,6 +1483,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     if (_showDrawingToolPanel) {
       _showOverlay = true;
     }
+    setState(() {});
     _markOverlayNeedsBuild();
   }
 
