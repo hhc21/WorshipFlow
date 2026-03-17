@@ -83,7 +83,7 @@ void main() {
     await pumpSegmentBPage(tester, firestore);
 
     await tester.enterText(fieldByLabel('적용찬양 입력'), '1 새로운 생명 G');
-    await tester.tap(find.text('추가').first);
+    await tester.tap(find.text('적용찬양 추가').first);
     await tester.pumpAndSettle();
 
     await tester.enterText(
@@ -112,5 +112,39 @@ void main() {
     expect(find.textContaining('새로운 생명'), findsWidgets);
     expect(find.textContaining('주의 집에 거하는 자'), findsWidgets);
     expect(find.textContaining('나를 지으신 이가 하나님'), findsWidgets);
+    expect(find.byTooltip('삭제'), findsNWidgets(3));
+    expect(find.byTooltip('아래로 이동'), findsWidgets);
+
+    await tester.tap(find.byTooltip('아래로 이동').first);
+    await tester.pumpAndSettle();
+
+    var reordered = await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentB_application')
+        .orderBy('order')
+        .get();
+    expect(reordered.docs.map((doc) => doc.data()['displayTitle']).toList(), [
+      '주의 집에 거하는 자',
+      '새로운 생명',
+      '나를 지으신 이가 하나님',
+    ]);
+
+    await tester.tap(find.byTooltip('삭제').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ElevatedButton, '삭제'));
+    await tester.pumpAndSettle();
+
+    final afterDelete = await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentB_application')
+        .orderBy('order')
+        .get();
+    expect(afterDelete.docs, hasLength(2));
   });
 }

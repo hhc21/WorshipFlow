@@ -388,7 +388,7 @@ Widget _buildLiveCueOperatorPage(
 
                           final setlistPanel = AppSectionCard(
                             icon: Icons.format_list_numbered_rounded,
-                            title: '세트리스트',
+                            title: '등록 콘티',
                             subtitle: 'LiveCue 반영 기준 목록',
                             child: items.isEmpty
                                 ? AppStateCard(
@@ -408,6 +408,9 @@ Widget _buildLiveCueOperatorPage(
                                         const SizedBox(height: 8),
                                     itemBuilder: (context, index) {
                                       final data = items[index].data();
+                                      final colorScheme = Theme.of(
+                                        context,
+                                      ).colorScheme;
                                       final label = _displayOrderLabelFromItem(
                                         data,
                                         index + 1,
@@ -422,117 +425,95 @@ Widget _buildLiveCueOperatorPage(
                                         keyText: key,
                                       );
                                       final isCurrent = index == currentIndex;
-                                      return Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(
-                                            12,
-                                          ),
-                                          color: isCurrent
-                                              ? Theme.of(context)
-                                                    .colorScheme
-                                                    .primary
-                                                    .withValues(alpha: 0.1)
-                                              : Theme.of(context)
-                                                    .colorScheme
-                                                    .surfaceContainerHighest
-                                                    .withValues(alpha: 0.45),
-                                        ),
-                                        child: ListTile(
-                                          title: Text(
-                                            line,
-                                            style: isCurrent
-                                                ? const TextStyle(
-                                                    fontWeight: FontWeight.w800,
-                                                    fontSize: 17,
-                                                  )
-                                                : const TextStyle(fontSize: 16),
-                                          ),
-                                          trailing: Wrap(
-                                            spacing: 2,
-                                            children: [
-                                              if (isCurrent)
-                                                const Padding(
-                                                  padding: EdgeInsets.symmetric(
-                                                    horizontal: 8,
-                                                    vertical: 12,
-                                                  ),
-                                                  child: Icon(Icons.music_note),
-                                                )
-                                              else if (widget.canEdit)
-                                                IconButton(
-                                                  icon: const Icon(
-                                                    Icons.playlist_play,
-                                                  ),
-                                                  tooltip: '현재 Cue로 이동',
-                                                  onPressed: () =>
-                                                      applySetlistAsCurrent(
-                                                        firestore,
-                                                        items,
-                                                        index,
-                                                      ),
-                                                ),
-                                              if (widget.canEdit && index > 0)
-                                                IconButton(
-                                                  icon: const Icon(
-                                                    Icons.arrow_upward,
-                                                  ),
-                                                  tooltip: '위로 이동',
-                                                  onPressed:
-                                                      setlistMutationInFlight
-                                                      ? null
-                                                      : () =>
-                                                            reorderSetlistItem(
-                                                              firestore,
-                                                              items,
-                                                              oldIndex: index,
-                                                              newIndex:
-                                                                  index - 1,
-                                                            ),
-                                                ),
-                                              if (widget.canEdit &&
-                                                  index < items.length - 1)
-                                                IconButton(
-                                                  icon: const Icon(
-                                                    Icons.arrow_downward,
-                                                  ),
-                                                  tooltip: '아래로 이동',
-                                                  onPressed:
-                                                      setlistMutationInFlight
-                                                      ? null
-                                                      : () =>
-                                                            reorderSetlistItem(
-                                                              firestore,
-                                                              items,
-                                                              oldIndex: index,
-                                                              newIndex:
-                                                                  index + 1,
-                                                            ),
-                                                ),
-                                              if (widget.canEdit)
-                                                IconButton(
-                                                  icon: const Icon(
-                                                    Icons.delete_outline,
-                                                  ),
-                                                  tooltip: '삭제',
-                                                  onPressed:
-                                                      setlistMutationInFlight
-                                                      ? null
-                                                      : () => deleteSetlistItem(
-                                                          context,
-                                                          firestore,
-                                                          items[index],
-                                                        ),
-                                                ),
-                                            ],
-                                          ),
-                                          onTap: widget.canEdit
-                                              ? () => applySetlistAsCurrent(
-                                                  firestore,
-                                                  items,
-                                                  index,
+                                      return AppActionListTile(
+                                        backgroundColor: isCurrent
+                                            ? colorScheme.primaryContainer
+                                                  .withValues(alpha: 0.58)
+                                            : colorScheme
+                                                  .surfaceContainerHighest
+                                                  .withValues(alpha: 0.46),
+                                        title: Text(
+                                          line,
+                                          style: isCurrent
+                                              ? const TextStyle(
+                                                  fontWeight: FontWeight.w800,
                                                 )
                                               : null,
                                         ),
+                                        subtitle: isCurrent
+                                            ? Text(
+                                                widget.canEdit
+                                                    ? '현재 Cue에 반영 중'
+                                                    : '현재 Cue',
+                                              )
+                                            : null,
+                                        actions: [
+                                          if (!isCurrent && widget.canEdit)
+                                            IconButton(
+                                              icon: const Icon(
+                                                Icons.playlist_play,
+                                              ),
+                                              tooltip: '현재 Cue로 이동',
+                                              onPressed: () =>
+                                                  applySetlistAsCurrent(
+                                                    firestore,
+                                                    items,
+                                                    index,
+                                                  ),
+                                            ),
+                                          if (widget.canEdit && index > 0)
+                                            IconButton(
+                                              icon: const Icon(
+                                                Icons.arrow_upward,
+                                              ),
+                                              tooltip: '위로 이동',
+                                              onPressed: setlistMutationInFlight
+                                                  ? null
+                                                  : () => reorderSetlistItem(
+                                                      firestore,
+                                                      items,
+                                                      oldIndex: index,
+                                                      newIndex: index - 1,
+                                                    ),
+                                            ),
+                                          if (widget.canEdit &&
+                                              index < items.length - 1)
+                                            IconButton(
+                                              icon: const Icon(
+                                                Icons.arrow_downward,
+                                              ),
+                                              tooltip: '아래로 이동',
+                                              onPressed: setlistMutationInFlight
+                                                  ? null
+                                                  : () => reorderSetlistItem(
+                                                      firestore,
+                                                      items,
+                                                      oldIndex: index,
+                                                      newIndex: index + 1,
+                                                    ),
+                                            ),
+                                          if (widget.canEdit)
+                                            IconButton(
+                                              icon: const Icon(
+                                                Icons.delete_outline,
+                                              ),
+                                              tooltip: '삭제',
+                                              onPressed: setlistMutationInFlight
+                                                  ? null
+                                                  : () => deleteSetlistItem(
+                                                      context,
+                                                      firestore,
+                                                      items[index],
+                                                    ),
+                                            ),
+                                        ],
+                                        onTap: widget.canEdit
+                                            ? () => applySetlistAsCurrent(
+                                                firestore,
+                                                items,
+                                                index,
+                                              )
+                                            : null,
                                       );
                                     },
                                   ),

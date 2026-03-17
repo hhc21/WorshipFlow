@@ -152,6 +152,18 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
 }
 
 void main() {
+  testWidgets('live cue e2e: operator setlist keeps aligned action controls', (
+    tester,
+  ) async {
+    await _pumpLiveCueApp(tester);
+
+    expect(find.text('등록 콘티'), findsOneWidget);
+    expect(find.byTooltip('현재 Cue로 이동'), findsOneWidget);
+    expect(find.byTooltip('위로 이동'), findsOneWidget);
+    expect(find.byTooltip('아래로 이동'), findsOneWidget);
+    expect(find.byTooltip('삭제'), findsNWidgets(2));
+  });
+
   testWidgets('live cue e2e: keyboard and swipe move current line', (
     tester,
   ) async {
