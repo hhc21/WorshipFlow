@@ -13,12 +13,43 @@ Widget _buildLiveCueSectionBadge(
   ProjectSetlistSectionType sectionType,
 ) {
   final colorScheme = Theme.of(context).colorScheme;
-  return Chip(
-    visualDensity: VisualDensity.compact,
-    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-    side: BorderSide(color: colorScheme.outlineVariant.withValues(alpha: 0.35)),
-    backgroundColor: colorScheme.surface.withValues(alpha: 0.92),
-    label: Text(sectionType.displayLabel()),
+  final backgroundColor = switch (sectionType) {
+    ProjectSetlistSectionType.worship =>
+      colorScheme.primaryContainer.withValues(alpha: 0.72),
+    ProjectSetlistSectionType.sermonResponse =>
+      colorScheme.tertiaryContainer.withValues(alpha: 0.72),
+    ProjectSetlistSectionType.prayer =>
+      colorScheme.secondaryContainer.withValues(alpha: 0.72),
+  };
+  final icon = switch (sectionType) {
+    ProjectSetlistSectionType.worship => Icons.music_note_rounded,
+    ProjectSetlistSectionType.sermonResponse => Icons.reply_rounded,
+    ProjectSetlistSectionType.prayer => Icons.volunteer_activism_outlined,
+  };
+  return AppInfoPill(
+    icon: icon,
+    label: sectionType.displayLabel(),
+    backgroundColor: backgroundColor,
+  );
+}
+
+Widget _buildLiveCueOrderBadge(BuildContext context, dynamic rawOrder) {
+  final order = (rawOrder as num?)?.toInt();
+  return AppInfoPill(
+    icon: Icons.format_list_numbered_rounded,
+    label: order == null ? '전체 순서 미정' : '전체 순서 $order',
+  );
+}
+
+Widget _buildLiveCueCurrentBadge(
+  BuildContext context, {
+  required bool canEdit,
+}) {
+  final colorScheme = Theme.of(context).colorScheme;
+  return AppInfoPill(
+    icon: Icons.play_arrow_rounded,
+    label: canEdit ? '현재 Cue 반영 중' : '현재 Cue',
+    backgroundColor: colorScheme.primaryContainer.withValues(alpha: 0.82),
   );
 }
 
@@ -411,7 +442,8 @@ Widget _buildLiveCueOperatorPage(
                           final setlistPanel = AppSectionCard(
                             icon: Icons.format_list_numbered_rounded,
                             title: '등록 콘티',
-                            subtitle: 'LiveCue 반영 기준 목록',
+                            subtitle:
+                                '전체 예배 순서를 그대로 표시합니다. 배지로 섹션과 순서를 빠르게 구분합니다.',
                             child: items.isEmpty
                                 ? AppStateCard(
                                     icon: Icons
@@ -474,11 +506,14 @@ Widget _buildLiveCueOperatorPage(
                                               context,
                                               sectionType,
                                             ),
+                                            _buildLiveCueOrderBadge(
+                                              context,
+                                              data['order'],
+                                            ),
                                             if (isCurrent)
-                                              Text(
-                                                widget.canEdit
-                                                    ? '현재 Cue에 반영 중'
-                                                    : '현재 Cue',
+                                              _buildLiveCueCurrentBadge(
+                                                context,
+                                                canEdit: widget.canEdit,
                                               ),
                                           ],
                                         ),
