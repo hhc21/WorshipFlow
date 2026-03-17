@@ -7,6 +7,7 @@ import '../../app/ui_components.dart';
 import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
 import '../../utils/song_parser.dart';
+import 'models/project_setlist_section_type.dart';
 
 class SegmentBPage extends ConsumerStatefulWidget {
   final String teamId;
@@ -36,17 +37,80 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
     super.dispose();
   }
 
-  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadItems(
+  CollectionReference<Map<String, dynamic>> _canonicalSetlistRef(
     FirebaseFirestore firestore,
-  ) async {
-    final snapshot = await firestore
+  ) {
+    return firestore
         .collection('teams')
         .doc(widget.teamId)
         .collection('projects')
         .doc(widget.projectId)
-        .collection('segmentB_application')
-        .orderBy('order')
-        .get();
+        .collection('segmentA_setlist');
+  }
+
+  ProjectSetlistSectionType _sectionTypeFromItem(Map<String, dynamic> data) {
+    return ProjectSetlistSectionType.fromUnknown(
+      data['sectionType']?.toString(),
+    );
+  }
+
+  IconData _sectionIcon(ProjectSetlistSectionType sectionType) {
+    switch (sectionType) {
+      case ProjectSetlistSectionType.worship:
+        return Icons.music_note_rounded;
+      case ProjectSetlistSectionType.sermonResponse:
+        return Icons.reply_rounded;
+      case ProjectSetlistSectionType.prayer:
+        return Icons.volunteer_activism_outlined;
+    }
+  }
+
+  Widget _buildSectionBadge(
+    BuildContext context,
+    ProjectSetlistSectionType sectionType,
+  ) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final backgroundColor = switch (sectionType) {
+      ProjectSetlistSectionType.worship =>
+        colorScheme.primaryContainer.withValues(alpha: 0.72),
+      ProjectSetlistSectionType.sermonResponse =>
+        colorScheme.tertiaryContainer.withValues(alpha: 0.72),
+      ProjectSetlistSectionType.prayer =>
+        colorScheme.secondaryContainer.withValues(alpha: 0.72),
+    };
+    return AppInfoPill(
+      icon: _sectionIcon(sectionType),
+      label: sectionType.displayLabel(),
+      backgroundColor: backgroundColor,
+    );
+  }
+
+  Widget _buildCanonicalOrderBadge(BuildContext context, dynamic rawOrder) {
+    final order = (rawOrder as num?)?.toInt();
+    return AppInfoPill(
+      icon: Icons.format_list_numbered_rounded,
+      label: order == null ? '전체 순서 미정' : '전체 순서 $order',
+    );
+  }
+
+  bool _isAppliedSection(Map<String, dynamic> data) {
+    final sectionType = _sectionTypeFromItem(data);
+    return sectionType == ProjectSetlistSectionType.sermonResponse ||
+        sectionType == ProjectSetlistSectionType.prayer;
+  }
+
+  String? _normalizedKeyText(dynamic raw) {
+    final value = raw?.toString().trim() ?? '';
+    if (value.isEmpty) return null;
+    return normalizeKeyText(value);
+  }
+
+  Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadItems(
+    FirebaseFirestore firestore,
+  ) async {
+    final snapshot = await _canonicalSetlistRef(
+      firestore,
+    ).orderBy('order').get();
     return snapshot.docs;
   }
 
@@ -72,6 +136,7 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
 
       String? songId;
       String displayTitle = parsed.title;
+      final normalizedKey = _normalizedKeyText(parsed.keyText);
       if (candidates.length == 1) {
         songId = candidates.first.id;
         displayTitle = candidates.first.title;
@@ -83,13 +148,6 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
         }
       }
 
-      final collection = firestore
-          .collection('teams')
-          .doc(widget.teamId)
-          .collection('projects')
-          .doc(widget.projectId)
-          .collection('segmentB_application');
-
       final currentItems = await _loadItems(firestore);
       final lastOrder = currentItems.isEmpty
           ? 0
@@ -97,12 +155,15 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
                 currentItems.length;
       final nextOrder = lastOrder + 1;
 
-      await collection.add({
+      await _canonicalSetlistRef(firestore).add({
         'order': nextOrder,
+        'cueLabel': nextOrder.toString(),
         'songId': songId,
         'freeTextTitle': songId == null ? parsed.title : null,
         'displayTitle': displayTitle,
-        'keyText': parsed.keyText,
+        'keyText': normalizedKey,
+        'sectionType': ProjectSetlistSectionType.sermonResponse
+            .toFirestoreValue(),
         'createdAt': FieldValue.serverTimestamp(),
       });
 
@@ -190,13 +251,6 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
     final firestore = ref.read(firestoreProvider);
 
     try {
-      final collection = firestore
-          .collection('teams')
-          .doc(widget.teamId)
-          .collection('projects')
-          .doc(widget.projectId)
-          .collection('segmentB_application');
-
       final currentItems = await _loadItems(firestore);
       var orderCursor = currentItems.isEmpty
           ? 0
@@ -214,12 +268,15 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
           continue;
         }
         orderCursor += 1;
-        batch.set(collection.doc(), {
+        batch.set(_canonicalSetlistRef(firestore).doc(), {
           'order': orderCursor,
+          'cueLabel': orderCursor.toString(),
           'songId': resolved.songId,
           'freeTextTitle': resolved.freeTextTitle,
           'displayTitle': resolved.displayTitle,
           'keyText': resolved.keyText,
+          'sectionType': ProjectSetlistSectionType.sermonResponse
+              .toFirestoreValue(),
           'createdAt': FieldValue.serverTimestamp(),
         });
         addedCount += 1;
@@ -352,7 +409,7 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
     final composeSection = AppSectionCard(
       icon: Icons.queue_music_rounded,
       title: '적용찬양 입력',
-      subtitle: '단건 입력과 여러 줄 일괄 입력을 모두 지원합니다.',
+      subtitle: '설교 응답 / 기도 섹션을 같은 canonical setlist에 추가합니다.',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -446,32 +503,51 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
               );
             }
             final items = snapshot.data ?? [];
-            if (items.isEmpty) {
+            final appliedEntries = items.asMap().entries.where((entry) {
+              return _isAppliedSection(entry.value.data());
+            }).toList();
+            if (appliedEntries.isEmpty) {
               return AppStateCard(
                 icon: Icons.queue_music_outlined,
                 title: '등록된 적용찬양이 없습니다',
                 message: widget.canEdit
                     ? '위 입력창에서 적용찬양을 추가해 주세요.'
-                    : '팀장이 적용찬양을 등록하면 여기에서 확인할 수 있습니다.',
+                    : '팀장이 설교 응답 또는 기도 섹션을 등록하면 여기에서 확인할 수 있습니다.',
               );
             }
             return ListView.separated(
-              itemCount: items.length,
+              itemCount: appliedEntries.length,
               separatorBuilder: (_, _) => const SizedBox(height: 8),
               itemBuilder: (context, index) {
-                final data = items[index].data();
+                final entry = appliedEntries[index];
+                final globalIndex = entry.key;
+                final itemDoc = entry.value;
+                final data = itemDoc.data();
                 final key = data['keyText']?.toString();
                 final title =
                     data['displayTitle']?.toString() ??
                     data['freeTextTitle']?.toString() ??
                     '곡';
                 final songId = data['songId']?.toString();
+                final sectionType = _sectionTypeFromItem(data);
                 final query = (key == null || key.isEmpty)
                     ? ''
                     : '?key=${Uri.encodeComponent(key)}';
                 return AppActionListTile(
-                  title: Text('${data['order']} ${key ?? ''} $title'.trim()),
-                  subtitle: songId == null ? const Text('미연결 제목') : null,
+                  title: Text(
+                    '${data['cueLabel'] ?? data['order']} ${key ?? ''} $title'
+                        .trim(),
+                  ),
+                  subtitle: Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _buildSectionBadge(context, sectionType),
+                      _buildCanonicalOrderBadge(context, data['order']),
+                      if (songId == null) const Text('미연결 제목'),
+                    ],
+                  ),
                   actions: [
                     if (widget.canEdit && index > 0)
                       IconButton(
@@ -482,11 +558,11 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
                             : () => _reorderItem(
                                 firestore,
                                 items,
-                                oldIndex: index,
-                                newIndex: index - 1,
+                                oldIndex: globalIndex,
+                                newIndex: appliedEntries[index - 1].key,
                               ),
                       ),
-                    if (widget.canEdit && index < items.length - 1)
+                    if (widget.canEdit && index < appliedEntries.length - 1)
                       IconButton(
                         icon: const Icon(Icons.arrow_downward),
                         tooltip: '아래로 이동',
@@ -495,8 +571,8 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
                             : () => _reorderItem(
                                 firestore,
                                 items,
-                                oldIndex: index,
-                                newIndex: index + 1,
+                                oldIndex: globalIndex,
+                                newIndex: appliedEntries[index + 1].key,
                               ),
                       ),
                     if (songId != null)
@@ -513,7 +589,7 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
                         tooltip: '삭제',
                         onPressed: _saving
                             ? null
-                            : () => _deleteItem(context, items[index]),
+                            : () => _deleteItem(context, itemDoc),
                       ),
                   ],
                 );
@@ -542,7 +618,7 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
                 final listCard = AppSectionCard(
                   icon: Icons.format_list_numbered_rounded,
                   title: '적용찬양 목록',
-                  subtitle: '현재 등록된 적용찬양 순서',
+                  subtitle: '전체 예배 순서 중 설교 응답 / 기도 섹션만 표시됩니다.',
                   child: isWide
                       ? SizedBox(height: 620, child: listSection)
                       : listSection,

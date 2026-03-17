@@ -342,14 +342,68 @@ class AppActionListTile extends StatelessWidget {
       child: ListTile(
         title: title,
         subtitle: subtitle,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        minVerticalPadding: 10,
         trailing: actions.isEmpty
             ? null
             : Wrap(
-                spacing: 2,
+                spacing: 4,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: actions,
               ),
         onTap: onTap,
+      ),
+    );
+  }
+}
+
+class AppInfoPill extends StatelessWidget {
+  final String label;
+  final IconData? icon;
+  final Color? backgroundColor;
+  final Color? foregroundColor;
+  final Color? borderColor;
+
+  const AppInfoPill({
+    super.key,
+    required this.label,
+    this.icon,
+    this.backgroundColor,
+    this.foregroundColor,
+    this.borderColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final resolvedForeground = foregroundColor ?? colorScheme.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        color:
+            backgroundColor ??
+            colorScheme.surfaceContainerHighest.withValues(alpha: 0.72),
+        border: Border.all(
+          color:
+              borderColor ?? colorScheme.outlineVariant.withValues(alpha: 0.32),
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 14, color: resolvedForeground),
+            const SizedBox(width: 6),
+          ],
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: resolvedForeground,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
       ),
     );
   }

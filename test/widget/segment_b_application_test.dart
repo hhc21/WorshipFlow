@@ -59,6 +59,52 @@ void main() {
     );
   }
 
+  testWidgets('application tab reads only canonical applied sections', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    final setlistRef = firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist');
+
+    await setlistRef.doc('worship-1').set({
+      'order': 1,
+      'cueLabel': '1',
+      'displayTitle': '예배 전 곡',
+      'freeTextTitle': '예배 전 곡',
+      'keyText': 'C',
+      'sectionType': 'worship',
+    });
+    await setlistRef.doc('response-1').set({
+      'order': 2,
+      'cueLabel': '2',
+      'displayTitle': '응답 곡',
+      'freeTextTitle': '응답 곡',
+      'keyText': 'D',
+      'sectionType': 'sermon_response',
+    });
+    await setlistRef.doc('prayer-1').set({
+      'order': 3,
+      'cueLabel': '3',
+      'displayTitle': '기도 곡',
+      'freeTextTitle': '기도 곡',
+      'keyText': 'E',
+      'sectionType': 'prayer',
+    });
+
+    await pumpSegmentBPage(tester, firestore);
+
+    expect(find.textContaining('예배 전 곡'), findsNothing);
+    expect(find.textContaining('응답 곡'), findsOneWidget);
+    expect(find.textContaining('기도 곡'), findsOneWidget);
+    expect(find.text('설교 응답'), findsOneWidget);
+    expect(find.text('기도'), findsOneWidget);
+  });
+
   testWidgets('application tab supports single add and bulk add', (
     tester,
   ) async {
@@ -98,17 +144,20 @@ void main() {
         .doc(teamId)
         .collection('projects')
         .doc(projectId)
-        .collection('segmentB_application')
+        .collection('segmentA_setlist')
         .orderBy('order')
         .get();
 
     expect(snapshot.docs, hasLength(3));
     expect(snapshot.docs[0].data()['displayTitle'], '새로운 생명');
     expect(snapshot.docs[0].data()['keyText'], 'G');
+    expect(snapshot.docs[0].data()['sectionType'], 'sermon_response');
     expect(snapshot.docs[1].data()['displayTitle'], '주의 집에 거하는 자');
     expect(snapshot.docs[1].data()['keyText'], 'D');
+    expect(snapshot.docs[1].data()['sectionType'], 'sermon_response');
     expect(snapshot.docs[2].data()['displayTitle'], '나를 지으신 이가 하나님');
     expect(snapshot.docs[2].data()['keyText'], 'G');
+    expect(snapshot.docs[2].data()['sectionType'], 'sermon_response');
     expect(find.textContaining('새로운 생명'), findsWidgets);
     expect(find.textContaining('주의 집에 거하는 자'), findsWidgets);
     expect(find.textContaining('나를 지으신 이가 하나님'), findsWidgets);
@@ -123,7 +172,7 @@ void main() {
         .doc(teamId)
         .collection('projects')
         .doc(projectId)
-        .collection('segmentB_application')
+        .collection('segmentA_setlist')
         .orderBy('order')
         .get();
     expect(reordered.docs.map((doc) => doc.data()['displayTitle']).toList(), [
@@ -142,7 +191,7 @@ void main() {
         .doc(teamId)
         .collection('projects')
         .doc(projectId)
-        .collection('segmentB_application')
+        .collection('segmentA_setlist')
         .orderBy('order')
         .get();
     expect(afterDelete.docs, hasLength(2));

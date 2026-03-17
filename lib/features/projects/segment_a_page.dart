@@ -50,6 +50,45 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     );
   }
 
+  IconData _sectionIcon(ProjectSetlistSectionType sectionType) {
+    switch (sectionType) {
+      case ProjectSetlistSectionType.worship:
+        return Icons.music_note_rounded;
+      case ProjectSetlistSectionType.sermonResponse:
+        return Icons.reply_rounded;
+      case ProjectSetlistSectionType.prayer:
+        return Icons.volunteer_activism_outlined;
+    }
+  }
+
+  Widget _buildSectionBadge(
+    BuildContext context,
+    ProjectSetlistSectionType sectionType,
+  ) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final backgroundColor = switch (sectionType) {
+      ProjectSetlistSectionType.worship =>
+        colorScheme.primaryContainer.withValues(alpha: 0.72),
+      ProjectSetlistSectionType.sermonResponse =>
+        colorScheme.tertiaryContainer.withValues(alpha: 0.72),
+      ProjectSetlistSectionType.prayer =>
+        colorScheme.secondaryContainer.withValues(alpha: 0.72),
+    };
+    return AppInfoPill(
+      icon: _sectionIcon(sectionType),
+      label: sectionType.displayLabel(),
+      backgroundColor: backgroundColor,
+    );
+  }
+
+  Widget _buildCanonicalOrderBadge(BuildContext context, dynamic rawOrder) {
+    final order = (rawOrder as num?)?.toInt();
+    return AppInfoPill(
+      icon: Icons.format_list_numbered_rounded,
+      label: order == null ? '전체 순서 미정' : '전체 순서 $order',
+    );
+  }
+
   @override
   void dispose() {
     _scriptureController.dispose();
@@ -1263,7 +1302,8 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         final composeSection = AppSectionCard(
           icon: Icons.playlist_add_check_rounded,
           title: '찬양 콘티 입력',
-          subtitle: '단건 입력과 여러 줄 일괄 입력을 모두 지원합니다.',
+          subtitle:
+              '예배 전 찬양 섹션만 편집합니다. 전체 예배 순서는 canonical setlist 기준으로 유지됩니다.',
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1391,7 +1431,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                         ? (widget.canEdit
                               ? '왼쪽 입력 영역에서 첫 곡을 추가해 주세요.'
                               : '팀장이 콘티를 등록하면 이곳에 표시됩니다.')
-                        : '현재 등록된 콘티 중 예배 전 섹션만 이곳에 표시됩니다.',
+                        : '전체 예배 순서 중 찬양 섹션만 이곳에 표시됩니다. 다른 섹션은 적용찬양과 LiveCue에서 이어집니다.',
                   );
                 }
                 return ListView.separated(
@@ -1421,11 +1461,20 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                     if (referenceLinks.isNotEmpty) {
                       subtitleParts.add('레퍼런스 ${referenceLinks.length}개');
                     }
+                    final sectionType = _sectionTypeFromItem(data);
                     return AppActionListTile(
                       title: Text('$cueLabel ${key ?? ''} $title'.trim()),
-                      subtitle: subtitleParts.isEmpty
-                          ? null
-                          : Text(subtitleParts.join(' · ')),
+                      subtitle: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          _buildSectionBadge(context, sectionType),
+                          _buildCanonicalOrderBadge(context, data['order']),
+                          if (subtitleParts.isNotEmpty)
+                            Text(subtitleParts.join(' · ')),
+                        ],
+                      ),
                       actions: [
                         if (widget.canEdit)
                           IconButton(
@@ -1526,7 +1575,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                             child: AppSectionCard(
                               icon: Icons.format_list_numbered_rounded,
                               title: '등록 콘티',
-                              subtitle: '라이브 운영에 사용할 순서표',
+                              subtitle: '전체 예배 순서 중 찬양 섹션만 표시됩니다.',
                               child: SizedBox(
                                 height: 620,
                                 child: setlistSection,
@@ -1546,7 +1595,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                           child: AppSectionCard(
                             icon: Icons.format_list_numbered_rounded,
                             title: '등록 콘티',
-                            subtitle: '라이브 운영에 사용할 순서표',
+                            subtitle: '전체 예배 순서 중 찬양 섹션만 표시됩니다.',
                             child: setlistSection,
                           ),
                         ),
