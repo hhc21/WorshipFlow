@@ -190,6 +190,64 @@ void main() {
     expect(cueAfterDelete.data()?['currentCueLabel'], isNull);
   });
 
+  testWidgets('bulk setlist input adds multiple items from textarea', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore.collection('songs').doc('song-1').set({
+      'title': '당신의 날에',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['당신의 날에'],
+    });
+    await firestore.collection('songs').doc('song-2').set({
+      'title': '주의 집에 거하는 자',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['주의 집에 거하는 자'],
+    });
+    await firestore.collection('songs').doc('song-3').set({
+      'title': '새로운 생명',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['새로운 생명'],
+    });
+    await firestore.collection('songs').doc('song-4').set({
+      'title': '나를 지으신 이가 하나님',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['나를 지으신 이가 하나님'],
+    });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    await tester.enterText(
+      fieldByLabel('콘티 일괄 입력 (여러 줄)'),
+      '1 새로운 생명 G\n2 주의 집에 거하는 자 D\n3 나를 지으신 이가 하나님 G',
+    );
+    await tester.tap(find.text('일괄 추가').first);
+    await tester.pumpAndSettle();
+
+    final snapshot = await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .orderBy('order')
+        .get();
+
+    expect(snapshot.docs, hasLength(3));
+    expect(snapshot.docs[0].data()['cueLabel'], '1');
+    expect(snapshot.docs[0].data()['displayTitle'], '새로운 생명');
+    expect(snapshot.docs[0].data()['keyText'], 'G');
+    expect(snapshot.docs[1].data()['cueLabel'], '2');
+    expect(snapshot.docs[1].data()['displayTitle'], '주의 집에 거하는 자');
+    expect(snapshot.docs[1].data()['keyText'], 'D');
+    expect(snapshot.docs[2].data()['cueLabel'], '3');
+    expect(snapshot.docs[2].data()['displayTitle'], '나를 지으신 이가 하나님');
+    expect(snapshot.docs[2].data()['keyText'], 'G');
+    expect(find.byTooltip('삭제'), findsNWidgets(3));
+    expect(find.byTooltip('아래로 이동'), findsWidgets);
+  });
+
   testWidgets(
     'setlist reorder keeps order deterministic and cue move updates current/next',
     (tester) async {

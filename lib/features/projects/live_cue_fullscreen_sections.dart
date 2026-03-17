@@ -133,15 +133,18 @@ Widget _buildLiveCuePendingSyncPreview({
       Positioned(
         top: 12,
         right: 12,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.black54,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: const Text(
-            'LiveCue 동기화 중... 미리보기 먼저 표시',
-            style: TextStyle(color: Colors.white, fontSize: 12),
+        child: IgnorePointer(
+          ignoring: true,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Text(
+              'LiveCue 동기화 중... 미리보기 먼저 표시',
+              style: TextStyle(color: Colors.white, fontSize: 12),
+            ),
           ),
         ),
       ),
@@ -403,10 +406,17 @@ Widget _buildLiveCueFullScreenPage(
                           items: items,
                           cueData: bootstrapCueData,
                         );
+                    final shouldDismissBootstrapBanner =
+                        state._shouldDismissBootstrapBanner;
+                    final renderBootstrapInteractiveUi =
+                        cueSnapshot.connectionState ==
+                            ConnectionState.waiting &&
+                        bootstrapCueReady &&
+                        shouldDismissBootstrapBanner;
                     if (cueSnapshot.connectionState ==
                         ConnectionState.waiting) {
                       beginCueWaitingWatchdog();
-                      if (bootstrapCueReady) {
+                      if (bootstrapCueReady && !renderBootstrapInteractiveUi) {
                         return buildPendingSyncPreview(
                           firestore: firestore,
                           storage: storage,
@@ -417,32 +427,40 @@ Widget _buildLiveCueFullScreenPage(
                       if (isCueWaitingTimedOut) {
                         if (!cueAutoRetryAttempted) {
                           scheduleCueAutoRetry();
-                          return const Center(
-                            child: AppLoadingState(
-                              message: 'LiveCue 자동 재연결 시도 중...',
+                          if (!renderBootstrapInteractiveUi) {
+                            return const Center(
+                              child: AppLoadingState(
+                                message: 'LiveCue 자동 재연결 시도 중...',
+                              ),
+                            );
+                          }
+                        }
+                        if (!renderBootstrapInteractiveUi) {
+                          return Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 520),
+                              child: AppStateCard(
+                                icon: Icons.sync_problem_outlined,
+                                isError: true,
+                                title: 'LiveCue 상태 동기화 지연',
+                                message:
+                                    '상태 문서를 읽지 못하고 있습니다. 권한/네트워크를 확인한 뒤 다시 시도해 주세요.',
+                                actionLabel: '다시 시도',
+                                onAction: retryCueSync,
+                              ),
                             ),
                           );
                         }
-                        return Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 520),
-                            child: AppStateCard(
-                              icon: Icons.sync_problem_outlined,
-                              isError: true,
-                              title: 'LiveCue 상태 동기화 지연',
-                              message:
-                                  '상태 문서를 읽지 못하고 있습니다. 권한/네트워크를 확인한 뒤 다시 시도해 주세요.',
-                              actionLabel: '다시 시도',
-                              onAction: retryCueSync,
-                            ),
-                          ),
+                      }
+                      if (!renderBootstrapInteractiveUi) {
+                        return const Center(
+                          child: CircularProgressIndicator(color: Colors.white),
                         );
                       }
-                      return const Center(
-                        child: CircularProgressIndicator(color: Colors.white),
-                      );
                     }
-                    clearCueWaitingWatchdog();
+                    if (!renderBootstrapInteractiveUi) {
+                      clearCueWaitingWatchdog();
+                    }
                     if (cueSnapshot.hasError) {
                       if (!cueAutoRetryAttempted) {
                         scheduleCueAutoRetry();
@@ -468,7 +486,8 @@ Widget _buildLiveCueFullScreenPage(
                     }
 
                     resetCueRetryState();
-                    if (!state._syncReadyMetricEmitted) {
+                    if (!renderBootstrapInteractiveUi &&
+                        !state._syncReadyMetricEmitted) {
                       state._syncReadyMetricEmitted = true;
                       final nowMs = DateTime.now().millisecondsSinceEpoch;
                       OpsMetrics.emit(
@@ -482,7 +501,9 @@ Widget _buildLiveCueFullScreenPage(
                         },
                       );
                     }
-                    final cueData = cueSnapshot.data?.data() ?? {};
+                    final cueData = renderBootstrapInteractiveUi
+                        ? bootstrapCueData
+                        : cueSnapshot.data?.data() ?? {};
                     state._latestCueData = cueData;
                     if (items.isNotEmpty &&
                         !_hasCueValue(cueData, 'current') &&
