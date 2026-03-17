@@ -136,6 +136,7 @@ void main() {
     expect(createdDoc.data()['cueLabel'], '1');
     expect(createdDoc.data()['displayTitle'], '테스트곡');
     expect(createdDoc.data()['keyText'], 'D');
+    expect(createdDoc.data()['sectionType'], 'worship');
 
     final cueAfterCreate = await liveCueRef.get();
     expect(cueAfterCreate.data()?['currentDisplayTitle'], '테스트곡');
@@ -238,14 +239,74 @@ void main() {
     expect(snapshot.docs[0].data()['cueLabel'], '1');
     expect(snapshot.docs[0].data()['displayTitle'], '새로운 생명');
     expect(snapshot.docs[0].data()['keyText'], 'G');
+    expect(snapshot.docs[0].data()['sectionType'], 'worship');
     expect(snapshot.docs[1].data()['cueLabel'], '2');
     expect(snapshot.docs[1].data()['displayTitle'], '주의 집에 거하는 자');
     expect(snapshot.docs[1].data()['keyText'], 'D');
+    expect(snapshot.docs[1].data()['sectionType'], 'worship');
     expect(snapshot.docs[2].data()['cueLabel'], '3');
     expect(snapshot.docs[2].data()['displayTitle'], '나를 지으신 이가 하나님');
     expect(snapshot.docs[2].data()['keyText'], 'G');
+    expect(snapshot.docs[2].data()['sectionType'], 'worship');
     expect(find.byTooltip('삭제'), findsNWidgets(3));
     expect(find.byTooltip('아래로 이동'), findsWidgets);
+  });
+
+  testWidgets('pre-service tab filters out non-worship section items', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('worship-explicit')
+        .set({
+          'order': 1,
+          'cueLabel': '1',
+          'displayTitle': '찬양 곡',
+          'freeTextTitle': '찬양 곡',
+          'keyText': 'D',
+          'sectionType': 'worship',
+        });
+    await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('worship-legacy')
+        .set({
+          'order': 2,
+          'cueLabel': '2',
+          'displayTitle': '레거시 곡',
+          'freeTextTitle': '레거시 곡',
+          'keyText': 'E',
+        });
+    await firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist')
+        .doc('response-hidden')
+        .set({
+          'order': 3,
+          'cueLabel': '3',
+          'displayTitle': '응답 곡',
+          'freeTextTitle': '응답 곡',
+          'keyText': 'F',
+          'sectionType': 'sermon_response',
+        });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    expect(find.textContaining('찬양 곡'), findsOneWidget);
+    expect(find.textContaining('레거시 곡'), findsOneWidget);
+    expect(find.textContaining('응답 곡'), findsNothing);
   });
 
   testWidgets(

@@ -73,6 +73,7 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
         'displayTitle': '첫 곡',
         'freeTextTitle': '첫 곡',
         'keyText': 'D',
+        'sectionType': 'worship',
       });
   await firestore
       .collection('teams')
@@ -86,6 +87,7 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
         'displayTitle': '두 번째 곡',
         'freeTextTitle': '두 번째 곡',
         'keyText': 'E',
+        'sectionType': 'sermon_response',
       });
   final liveCueState = <String, Object?>{
     'currentCueLabel': '1',
@@ -158,6 +160,8 @@ void main() {
     await _pumpLiveCueApp(tester);
 
     expect(find.text('등록 콘티'), findsOneWidget);
+    expect(find.text('찬양'), findsOneWidget);
+    expect(find.text('설교 응답'), findsOneWidget);
     expect(find.byTooltip('현재 Cue로 이동'), findsOneWidget);
     expect(find.byTooltip('위로 이동'), findsOneWidget);
     expect(find.byTooltip('아래로 이동'), findsOneWidget);

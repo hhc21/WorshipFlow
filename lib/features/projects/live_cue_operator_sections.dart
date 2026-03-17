@@ -1,5 +1,27 @@
 part of 'live_cue_page.dart';
 
+ProjectSetlistSectionType _liveCueSectionTypeFromItem(
+  Map<String, dynamic>? data,
+) {
+  return ProjectSetlistSectionType.fromUnknown(
+    data?['sectionType']?.toString(),
+  );
+}
+
+Widget _buildLiveCueSectionBadge(
+  BuildContext context,
+  ProjectSetlistSectionType sectionType,
+) {
+  final colorScheme = Theme.of(context).colorScheme;
+  return Chip(
+    visualDensity: VisualDensity.compact,
+    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    side: BorderSide(color: colorScheme.outlineVariant.withValues(alpha: 0.35)),
+    backgroundColor: colorScheme.surface.withValues(alpha: 0.92),
+    label: Text(sectionType.displayLabel()),
+  );
+}
+
 Widget _buildLiveCueOperatorPage(
   _LiveCuePageState state,
   BuildContext context,
@@ -425,6 +447,8 @@ Widget _buildLiveCueOperatorPage(
                                         keyText: key,
                                       );
                                       final isCurrent = index == currentIndex;
+                                      final sectionType =
+                                          _liveCueSectionTypeFromItem(data);
                                       return AppActionListTile(
                                         backgroundColor: isCurrent
                                             ? colorScheme.primaryContainer
@@ -440,13 +464,24 @@ Widget _buildLiveCueOperatorPage(
                                                 )
                                               : null,
                                         ),
-                                        subtitle: isCurrent
-                                            ? Text(
+                                        subtitle: Wrap(
+                                          spacing: 8,
+                                          runSpacing: 6,
+                                          crossAxisAlignment:
+                                              WrapCrossAlignment.center,
+                                          children: [
+                                            _buildLiveCueSectionBadge(
+                                              context,
+                                              sectionType,
+                                            ),
+                                            if (isCurrent)
+                                              Text(
                                                 widget.canEdit
                                                     ? '현재 Cue에 반영 중'
                                                     : '현재 Cue',
-                                              )
-                                            : null,
+                                              ),
+                                          ],
+                                        ),
                                         actions: [
                                           if (!isCurrent && widget.canEdit)
                                             IconButton(

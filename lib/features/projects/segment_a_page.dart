@@ -12,6 +12,7 @@ import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
 import '../../utils/song_parser.dart';
 import 'live_cue_sync_coordinator.dart';
+import 'models/project_setlist_section_type.dart';
 import 'models/setlist_music_metadata.dart';
 import 'setlist_music_metadata_validator.dart';
 
@@ -42,6 +43,12 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
   bool _saving = false;
   bool _reordering = false;
   bool _scriptureLoaded = false;
+
+  ProjectSetlistSectionType _sectionTypeFromItem(Map<String, dynamic> data) {
+    return ProjectSetlistSectionType.fromUnknown(
+      data['sectionType']?.toString(),
+    );
+  }
 
   @override
   void dispose() {
@@ -598,6 +605,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         'songId': songId,
         'freeTextTitle': null,
         'displayTitle': displayTitle,
+        'sectionType': ProjectSetlistSectionType.worship.toFirestoreValue(),
         'keyText': parsed.keyText == null
             ? null
             : normalizeKeyText(parsed.keyText!),
@@ -712,6 +720,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
           'songId': resolved.songId,
           'freeTextTitle': resolved.freeTextTitle,
           'displayTitle': resolved.displayTitle,
+          'sectionType': ProjectSetlistSectionType.worship.toFirestoreValue(),
           'keyText': resolved.keyText,
           'memoShared': '',
           'createdAt': FieldValue.serverTimestamp(),
@@ -1370,24 +1379,33 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                   );
                 }
                 final items = snapshot.data ?? [];
-                if (items.isEmpty) {
+                final worshipEntries = items.asMap().entries.where((entry) {
+                  return _sectionTypeFromItem(entry.value.data()) ==
+                      ProjectSetlistSectionType.worship;
+                }).toList();
+                if (worshipEntries.isEmpty) {
                   return AppStateCard(
                     icon: Icons.playlist_add_check_circle_outlined,
-                    title: '등록된 콘티가 없습니다',
-                    message: widget.canEdit
-                        ? '왼쪽 입력 영역에서 첫 곡을 추가해 주세요.'
-                        : '팀장이 콘티를 등록하면 이곳에 표시됩니다.',
+                    title: items.isEmpty ? '등록된 콘티가 없습니다' : '예배 전 콘티가 없습니다',
+                    message: items.isEmpty
+                        ? (widget.canEdit
+                              ? '왼쪽 입력 영역에서 첫 곡을 추가해 주세요.'
+                              : '팀장이 콘티를 등록하면 이곳에 표시됩니다.')
+                        : '현재 등록된 콘티 중 예배 전 섹션만 이곳에 표시됩니다.',
                   );
                 }
                 return ListView.separated(
-                  itemCount: items.length,
+                  itemCount: worshipEntries.length,
                   separatorBuilder: (_, _) => const SizedBox(height: 8),
                   itemBuilder: (context, index) {
-                    final data = items[index].data();
+                    final entry = worshipEntries[index];
+                    final globalIndex = entry.key;
+                    final itemDoc = entry.value;
+                    final data = itemDoc.data();
                     final key = data['keyText']?.toString();
                     final cueLabel = _displayOrderLabelFromItem(
                       data,
-                      fallbackOrder: index + 1,
+                      fallbackOrder: globalIndex + 1,
                     );
                     final title = _displayTitleFromSetlistItem(data);
                     final memo = data['memoShared']?.toString();
@@ -1416,7 +1434,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                             onPressed: () => _moveCueToSetlistItem(
                               context,
                               items,
-                              index: index,
+                              index: globalIndex,
                             ),
                           ),
                         if (widget.canEdit && index > 0)
@@ -1428,11 +1446,11 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                                 : () => _reorderSetlistItem(
                                     context,
                                     items,
-                                    oldIndex: index,
-                                    newIndex: index - 1,
+                                    oldIndex: globalIndex,
+                                    newIndex: worshipEntries[index - 1].key,
                                   ),
                           ),
-                        if (widget.canEdit && index < items.length - 1)
+                        if (widget.canEdit && index < worshipEntries.length - 1)
                           IconButton(
                             icon: const Icon(Icons.arrow_downward),
                             tooltip: '아래로 이동',
@@ -1441,29 +1459,28 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                                 : () => _reorderSetlistItem(
                                     context,
                                     items,
-                                    oldIndex: index,
-                                    newIndex: index + 1,
+                                    oldIndex: globalIndex,
+                                    newIndex: worshipEntries[index + 1].key,
                                   ),
                           ),
                         IconButton(
                           icon: const Icon(Icons.picture_as_pdf),
                           tooltip: '악보 열기',
                           onPressed: () =>
-                              _openSheetForSetlistItem(context, items[index]),
+                              _openSheetForSetlistItem(context, itemDoc),
                         ),
                         if (widget.canEdit)
                           IconButton(
                             icon: const Icon(Icons.edit),
                             tooltip: '수정',
-                            onPressed: () =>
-                                _editSetlistItem(context, items[index]),
+                            onPressed: () => _editSetlistItem(context, itemDoc),
                           ),
                         if (widget.canEdit)
                           IconButton(
                             icon: const Icon(Icons.delete_outline),
                             tooltip: '삭제',
                             onPressed: () =>
-                                _deleteSetlistItem(context, items[index]),
+                                _deleteSetlistItem(context, itemDoc),
                           ),
                       ],
                     );
