@@ -1403,83 +1403,69 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
                     if (referenceLinks.isNotEmpty) {
                       subtitleParts.add('레퍼런스 ${referenceLinks.length}개');
                     }
-                    return Container(
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(14),
-                        color: Theme.of(context)
-                            .colorScheme
-                            .surfaceContainerHighest
-                            .withValues(alpha: 0.46),
-                      ),
-                      child: ListTile(
-                        title: Text('$cueLabel ${key ?? ''} $title'.trim()),
-                        subtitle: subtitleParts.isEmpty
-                            ? null
-                            : Text(subtitleParts.join(' · ')),
-                        trailing: Wrap(
-                          spacing: 2,
-                          children: [
-                            if (widget.canEdit)
-                              IconButton(
-                                icon: const Icon(Icons.playlist_play),
-                                tooltip: '현재 Cue로 이동',
-                                onPressed: () => _moveCueToSetlistItem(
-                                  context,
-                                  items,
-                                  index: index,
-                                ),
-                              ),
-                            if (widget.canEdit && index > 0)
-                              IconButton(
-                                icon: const Icon(Icons.arrow_upward),
-                                tooltip: '위로 이동',
-                                onPressed: _reordering
-                                    ? null
-                                    : () => _reorderSetlistItem(
-                                        context,
-                                        items,
-                                        oldIndex: index,
-                                        newIndex: index - 1,
-                                      ),
-                              ),
-                            if (widget.canEdit && index < items.length - 1)
-                              IconButton(
-                                icon: const Icon(Icons.arrow_downward),
-                                tooltip: '아래로 이동',
-                                onPressed: _reordering
-                                    ? null
-                                    : () => _reorderSetlistItem(
-                                        context,
-                                        items,
-                                        oldIndex: index,
-                                        newIndex: index + 1,
-                                      ),
-                              ),
-                            IconButton(
-                              icon: const Icon(Icons.picture_as_pdf),
-                              tooltip: '악보 열기',
-                              onPressed: () => _openSheetForSetlistItem(
-                                context,
-                                items[index],
-                              ),
+                    return AppActionListTile(
+                      title: Text('$cueLabel ${key ?? ''} $title'.trim()),
+                      subtitle: subtitleParts.isEmpty
+                          ? null
+                          : Text(subtitleParts.join(' · ')),
+                      actions: [
+                        if (widget.canEdit)
+                          IconButton(
+                            icon: const Icon(Icons.playlist_play),
+                            tooltip: '현재 Cue로 이동',
+                            onPressed: () => _moveCueToSetlistItem(
+                              context,
+                              items,
+                              index: index,
                             ),
-                            if (widget.canEdit)
-                              IconButton(
-                                icon: const Icon(Icons.edit),
-                                tooltip: '수정',
-                                onPressed: () =>
-                                    _editSetlistItem(context, items[index]),
-                              ),
-                            if (widget.canEdit)
-                              IconButton(
-                                icon: const Icon(Icons.delete_outline),
-                                tooltip: '삭제',
-                                onPressed: () =>
-                                    _deleteSetlistItem(context, items[index]),
-                              ),
-                          ],
+                          ),
+                        if (widget.canEdit && index > 0)
+                          IconButton(
+                            icon: const Icon(Icons.arrow_upward),
+                            tooltip: '위로 이동',
+                            onPressed: _reordering
+                                ? null
+                                : () => _reorderSetlistItem(
+                                    context,
+                                    items,
+                                    oldIndex: index,
+                                    newIndex: index - 1,
+                                  ),
+                          ),
+                        if (widget.canEdit && index < items.length - 1)
+                          IconButton(
+                            icon: const Icon(Icons.arrow_downward),
+                            tooltip: '아래로 이동',
+                            onPressed: _reordering
+                                ? null
+                                : () => _reorderSetlistItem(
+                                    context,
+                                    items,
+                                    oldIndex: index,
+                                    newIndex: index + 1,
+                                  ),
+                          ),
+                        IconButton(
+                          icon: const Icon(Icons.picture_as_pdf),
+                          tooltip: '악보 열기',
+                          onPressed: () =>
+                              _openSheetForSetlistItem(context, items[index]),
                         ),
-                      ),
+                        if (widget.canEdit)
+                          IconButton(
+                            icon: const Icon(Icons.edit),
+                            tooltip: '수정',
+                            onPressed: () =>
+                                _editSetlistItem(context, items[index]),
+                          ),
+                        if (widget.canEdit)
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            tooltip: '삭제',
+                            onPressed: () =>
+                                _deleteSetlistItem(context, items[index]),
+                          ),
+                      ],
                     );
                   },
                 );

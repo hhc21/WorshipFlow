@@ -254,6 +254,77 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
     }
   }
 
+  Future<void> _reorderItem(
+    FirebaseFirestore firestore,
+    List<QueryDocumentSnapshot<Map<String, dynamic>>> items, {
+    required int oldIndex,
+    required int newIndex,
+  }) async {
+    if (!widget.canEdit ||
+        oldIndex < 0 ||
+        oldIndex >= items.length ||
+        newIndex < 0 ||
+        newIndex >= items.length ||
+        oldIndex == newIndex) {
+      return;
+    }
+
+    final reordered = [...items];
+    final moved = reordered.removeAt(oldIndex);
+    reordered.insert(newIndex, moved);
+
+    setState(() => _saving = true);
+    try {
+      final batch = firestore.batch();
+      for (var i = 0; i < reordered.length; i++) {
+        batch.update(reordered[i].reference, {'order': i + 1});
+      }
+      await batch.commit();
+      if (!mounted) return;
+      setState(() {});
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+      }
+    }
+  }
+
+  Future<void> _deleteItem(
+    BuildContext context,
+    QueryDocumentSnapshot<Map<String, dynamic>> itemDoc,
+  ) async {
+    if (!widget.canEdit || _saving) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('적용찬양 삭제'),
+        content: const Text('이 적용찬양 항목을 삭제할까요?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+
+    setState(() => _saving = true);
+    try {
+      await itemDoc.reference.delete();
+      if (!mounted) return;
+      setState(() {});
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+      }
+    }
+  }
+
   Future<SongCandidate?> _selectCandidate(
     BuildContext context,
     List<SongCandidate> candidates,
@@ -278,8 +349,181 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
   Widget build(BuildContext context) {
     final firestore = ref.watch(firestoreProvider);
 
+    final composeSection = AppSectionCard(
+      icon: Icons.queue_music_rounded,
+      title: '적용찬양 입력',
+      subtitle: '단건 입력과 여러 줄 일괄 입력을 모두 지원합니다.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '단건 예시: 1 D 새로운 생명 / 1 새로운 생명 D',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _inputController,
+            readOnly: !widget.canEdit,
+            decoration: appInputDecoration(
+              context,
+              label: '적용찬양 입력',
+              hint: '예: 1 D 새로운 생명 또는 1 새로운 생명 D',
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.icon(
+                onPressed: !widget.canEdit || _saving
+                    ? null
+                    : () => _addItem(context),
+                icon: _saving
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.playlist_add),
+                label: Text(_saving ? '추가 중...' : '적용찬양 추가'),
+              ),
+              const Chip(
+                avatar: Icon(Icons.auto_awesome, size: 16),
+                label: Text('번호 prefix / 키 자동 정리'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _bulkInputController,
+            minLines: 4,
+            maxLines: 8,
+            readOnly: !widget.canEdit,
+            decoration: appInputDecoration(
+              context,
+              label: '적용찬양 일괄 입력 (여러 줄)',
+              hint: '예:\n1 새로운 생명 G\n2 주의 집에 거하는 자 D\n3 나를 지으신 이가 하나님 G',
+              helper: '한 줄당 1곡 입력 후 [일괄 추가]. 번호 prefix는 자동 제거됩니다.',
+            ),
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.tonalIcon(
+              onPressed: !widget.canEdit || _saving
+                  ? null
+                  : () => _addItemsBulk(context),
+              icon: _saving
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.playlist_add_check),
+              label: const Text('일괄 추가'),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final listSection =
+        FutureBuilder<List<QueryDocumentSnapshot<Map<String, dynamic>>>>(
+          future: _loadItems(firestore),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const AppLoadingState(message: '적용찬양 목록 불러오는 중...');
+            }
+            if (snapshot.hasError) {
+              return AppStateCard(
+                icon: Icons.error_outline,
+                isError: true,
+                title: '적용찬양 로드 실패',
+                message: '${snapshot.error}',
+                actionLabel: '다시 시도',
+                onAction: () => setState(() {}),
+              );
+            }
+            final items = snapshot.data ?? [];
+            if (items.isEmpty) {
+              return AppStateCard(
+                icon: Icons.queue_music_outlined,
+                title: '등록된 적용찬양이 없습니다',
+                message: widget.canEdit
+                    ? '위 입력창에서 적용찬양을 추가해 주세요.'
+                    : '팀장이 적용찬양을 등록하면 여기에서 확인할 수 있습니다.',
+              );
+            }
+            return ListView.separated(
+              itemCount: items.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final data = items[index].data();
+                final key = data['keyText']?.toString();
+                final title =
+                    data['displayTitle']?.toString() ??
+                    data['freeTextTitle']?.toString() ??
+                    '곡';
+                final songId = data['songId']?.toString();
+                final query = (key == null || key.isEmpty)
+                    ? ''
+                    : '?key=${Uri.encodeComponent(key)}';
+                return AppActionListTile(
+                  title: Text('${data['order']} ${key ?? ''} $title'.trim()),
+                  subtitle: songId == null ? const Text('미연결 제목') : null,
+                  actions: [
+                    if (widget.canEdit && index > 0)
+                      IconButton(
+                        icon: const Icon(Icons.arrow_upward),
+                        tooltip: '위로 이동',
+                        onPressed: _saving
+                            ? null
+                            : () => _reorderItem(
+                                firestore,
+                                items,
+                                oldIndex: index,
+                                newIndex: index - 1,
+                              ),
+                      ),
+                    if (widget.canEdit && index < items.length - 1)
+                      IconButton(
+                        icon: const Icon(Icons.arrow_downward),
+                        tooltip: '아래로 이동',
+                        onPressed: _saving
+                            ? null
+                            : () => _reorderItem(
+                                firestore,
+                                items,
+                                oldIndex: index,
+                                newIndex: index + 1,
+                              ),
+                      ),
+                    if (songId != null)
+                      IconButton(
+                        icon: const Icon(Icons.picture_as_pdf),
+                        tooltip: '악보 열기',
+                        onPressed: () => context.go(
+                          '/teams/${widget.teamId}/songs/$songId$query',
+                        ),
+                      ),
+                    if (widget.canEdit)
+                      IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        tooltip: '삭제',
+                        onPressed: _saving
+                            ? null
+                            : () => _deleteItem(context, items[index]),
+                      ),
+                  ],
+                );
+              },
+            );
+          },
+        );
+
     return AppContentFrame(
-      maxWidth: 1360,
+      maxWidth: 1380,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -291,154 +535,36 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
             ),
             const SizedBox(height: 12),
           ],
-          AppSectionCard(
-            icon: Icons.queue_music_rounded,
-            title: '적용찬양 입력',
-            subtitle: '단건 입력과 여러 줄 일괄 입력을 모두 지원합니다.',
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _inputController,
-                        readOnly: !widget.canEdit,
-                        decoration: appInputDecoration(
-                          context,
-                          label: '적용찬양 입력',
-                          hint: '예: [G 주 예수 내 맘에 오사]',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    FilledButton.icon(
-                      onPressed: !widget.canEdit || _saving
-                          ? null
-                          : () => _addItem(context),
-                      icon: _saving
-                          ? const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.add),
-                      label: Text(_saving ? '추가 중...' : '추가'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _bulkInputController,
-                  minLines: 4,
-                  maxLines: 8,
-                  readOnly: !widget.canEdit,
-                  decoration: appInputDecoration(
-                    context,
-                    label: '적용찬양 일괄 입력 (여러 줄)',
-                    hint: '예:\n1 새로운 생명 G\n2 주의 집에 거하는 자 D\n3 나를 지으신 이가 하나님 G',
-                    helper: '한 줄당 1곡 입력 후 [일괄 추가]. 번호 prefix는 자동 제거됩니다.',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                FilledButton.tonalIcon(
-                  onPressed: !widget.canEdit || _saving
-                      ? null
-                      : () => _addItemsBulk(context),
-                  icon: _saving
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.playlist_add_check),
-                  label: const Text('일괄 추가'),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
           Expanded(
-            child: AppSectionCard(
-              icon: Icons.format_list_numbered_rounded,
-              title: '적용찬양 목록',
-              subtitle: '현재 등록된 적용찬양 순서',
-              child: SizedBox(
-                height: 520,
-                child:
-                    FutureBuilder<
-                      List<QueryDocumentSnapshot<Map<String, dynamic>>>
-                    >(
-                      future: _loadItems(firestore),
-                      builder: (context, snapshot) {
-                        if (snapshot.connectionState ==
-                            ConnectionState.waiting) {
-                          return const AppLoadingState(
-                            message: '적용찬양 목록 불러오는 중...',
-                          );
-                        }
-                        if (snapshot.hasError) {
-                          return AppStateCard(
-                            icon: Icons.error_outline,
-                            isError: true,
-                            title: '적용찬양 로드 실패',
-                            message: '${snapshot.error}',
-                            actionLabel: '다시 시도',
-                            onAction: () => setState(() {}),
-                          );
-                        }
-                        final items = snapshot.data ?? [];
-                        if (items.isEmpty) {
-                          return AppStateCard(
-                            icon: Icons.queue_music_outlined,
-                            title: '등록된 적용찬양이 없습니다',
-                            message: widget.canEdit
-                                ? '위 입력창에서 적용찬양을 추가해 주세요.'
-                                : '팀장이 적용찬양을 등록하면 여기에서 확인할 수 있습니다.',
-                          );
-                        }
-                        return ListView.separated(
-                          itemCount: items.length,
-                          separatorBuilder: (_, _) => const SizedBox(height: 8),
-                          itemBuilder: (context, index) {
-                            final data = items[index].data();
-                            final key = data['keyText']?.toString();
-                            final title =
-                                data['displayTitle']?.toString() ??
-                                data['freeTextTitle']?.toString() ??
-                                '곡';
-                            final songId = data['songId']?.toString();
-                            final query = (key == null || key.isEmpty)
-                                ? ''
-                                : '?key=${Uri.encodeComponent(key)}';
-                            return Container(
-                              decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(14),
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .surfaceContainerHighest
-                                    .withValues(alpha: 0.46),
-                              ),
-                              child: ListTile(
-                                title: Text(
-                                  '${data['order']} ${key ?? ''} $title'.trim(),
-                                ),
-                                trailing: songId == null
-                                    ? null
-                                    : IconButton(
-                                        icon: const Icon(Icons.picture_as_pdf),
-                                        tooltip: '악보 열기',
-                                        onPressed: () => context.go(
-                                          '/teams/${widget.teamId}/songs/$songId$query',
-                                        ),
-                                      ),
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-              ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final isWide = constraints.maxWidth >= 1180;
+                final listCard = AppSectionCard(
+                  icon: Icons.format_list_numbered_rounded,
+                  title: '적용찬양 목록',
+                  subtitle: '현재 등록된 적용찬양 순서',
+                  child: isWide
+                      ? SizedBox(height: 620, child: listSection)
+                      : listSection,
+                );
+                if (isWide) {
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(flex: 5, child: composeSection),
+                      const SizedBox(width: 12),
+                      Expanded(flex: 7, child: listCard),
+                    ],
+                  );
+                }
+                return Column(
+                  children: [
+                    composeSection,
+                    const SizedBox(height: 12),
+                    Expanded(child: listCard),
+                  ],
+                );
+              },
             ),
           ),
         ],

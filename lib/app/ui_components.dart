@@ -311,6 +311,50 @@ class AppStateCard extends StatelessWidget {
   }
 }
 
+class AppActionListTile extends StatelessWidget {
+  final Widget title;
+  final Widget? subtitle;
+  final List<Widget> actions;
+  final VoidCallback? onTap;
+  final Color? backgroundColor;
+  final double borderRadius;
+
+  const AppActionListTile({
+    super.key,
+    required this.title,
+    this.subtitle,
+    this.actions = const <Widget>[],
+    this.onTap,
+    this.backgroundColor,
+    this.borderRadius = 14,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(borderRadius),
+        color:
+            backgroundColor ??
+            colorScheme.surfaceContainerHighest.withValues(alpha: 0.46),
+      ),
+      child: ListTile(
+        title: title,
+        subtitle: subtitle,
+        trailing: actions.isEmpty
+            ? null
+            : Wrap(
+                spacing: 2,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: actions,
+              ),
+        onTap: onTap,
+      ),
+    );
+  }
+}
+
 class AppLoadingState extends StatelessWidget {
   final String message;
 
