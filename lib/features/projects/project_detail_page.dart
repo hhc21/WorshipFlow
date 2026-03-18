@@ -9,6 +9,7 @@ import '../../app/ui_components.dart';
 import '../../core/ops/ops_metrics.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
+import '../../services/ops_metrics.dart';
 import 'live_cue_page.dart';
 import 'segment_a_page.dart';
 import 'segment_b_page.dart';
@@ -71,6 +72,141 @@ class ProjectDetailPage extends ConsumerWidget {
       // Ignore and return null below.
     }
     return null;
+  }
+
+  Future<String> _enqueueDeleteRequest({
+    required FirebaseFirestore firestore,
+    required String requestedBy,
+    required String projectId,
+  }) async {
+    final queueRef = firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('deleteQueue')
+        .doc();
+    await queueRef.set({
+      'teamId': teamId,
+      'projectId': projectId,
+      'requestedBy': requestedBy,
+      'type': 'projectDelete',
+      'status': 'queued',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+    return queueRef.id;
+  }
+
+  Future<void> _confirmAndQueueProjectDelete(
+    BuildContext context,
+    WidgetRef ref, {
+    required String projectLabel,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('프로젝트 삭제 요청'),
+        content: Text(
+          '"$projectLabel" 프로젝트 삭제를 요청합니다.\n'
+          '현재 구조에서는 삭제 큐에 요청이 등록되며, 처리 전까지 목록에 남아 있을 수 있습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('삭제 요청'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final firestore = ref.read(firestoreProvider);
+    final currentUserId = ref.read(firebaseAuthProvider).currentUser?.uid ?? '';
+    if (currentUserId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('로그인 정보가 없어 삭제 요청을 생성할 수 없습니다.')),
+      );
+      return;
+    }
+
+    unawaited(
+      logTeamOpsMetric(
+        firestore: firestore,
+        teamId: teamId,
+        category: 'delete',
+        action: 'project_delete',
+        status: 'started',
+        extra: <String, Object?>{'projectId': projectId},
+      ),
+    );
+
+    try {
+      final requestId = await _enqueueDeleteRequest(
+        firestore: firestore,
+        requestedBy: currentUserId,
+        projectId: projectId,
+      );
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'queued',
+          extra: <String, Object?>{
+            'projectId': projectId,
+            'requestId': requestId,
+          },
+        ),
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('프로젝트 삭제 요청이 접수되었습니다. 요청 ID: $requestId (상태: queued)'),
+        ),
+      );
+      context.go('/teams/$teamId');
+    } on FirebaseException catch (error) {
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'failed',
+          code: error.code,
+          extra: <String, Object?>{'projectId': projectId},
+        ),
+      );
+      if (!context.mounted) return;
+      final message = error.code == 'permission-denied'
+          ? '삭제 큐 요청 권한이 없습니다. 운영자에게 deleteQueue 권한 설정을 요청해 주세요.'
+          : '프로젝트 삭제 큐 요청 실패: ${error.message ?? error.code}';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'failed',
+          code: 'unknown',
+          extra: <String, Object?>{
+            'projectId': projectId,
+            'error': error.toString(),
+          },
+        ),
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('프로젝트 삭제 큐 요청 실패: $error')));
+    }
   }
 
   @override
@@ -237,6 +373,16 @@ class ProjectDetailPage extends ConsumerWidget {
                         icon: const Icon(Icons.arrow_back_rounded),
                         label: const Text('팀 홈'),
                       ),
+                      if (canEdit)
+                        FilledButton.tonalIcon(
+                          onPressed: () => _confirmAndQueueProjectDelete(
+                            context,
+                            ref,
+                            projectLabel: projectLabel,
+                          ),
+                          icon: const Icon(Icons.delete_outline_rounded),
+                          label: const Text('프로젝트 삭제 요청'),
+                        ),
                       FilledButton.icon(
                         onPressed: () => context.go(
                           '/teams/$teamId/projects/$projectId/live',

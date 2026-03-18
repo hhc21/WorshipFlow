@@ -14,6 +14,7 @@ import '../../utils/song_parser.dart';
 import 'live_cue_sync_coordinator.dart';
 import 'models/project_setlist_section_type.dart';
 import 'models/setlist_music_metadata.dart';
+import 'setlist_ordering_helpers.dart';
 import 'setlist_music_metadata_validator.dart';
 
 class SegmentAPage extends ConsumerStatefulWidget {
@@ -465,11 +466,7 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     });
 
     try {
-      final batch = firestore.batch();
-      for (var i = 0; i < reordered.length; i++) {
-        batch.update(reordered[i].reference, {'order': i + 1});
-      }
-      await batch.commit();
+      await reindexCanonicalSetlistOrder(firestore, reordered);
 
       final refreshed = await _loadSetlist(firestore);
       final validation = RuntimeGuard.validateSetlistOrder(
@@ -633,25 +630,39 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
           ? 0
           : (currentItems.last.data()['order'] as num?)?.toInt() ??
                 currentItems.length;
-      final nextOrder = lastOrder + 1;
+      final nextCueLabelOrder = lastOrder + 1;
+      final insertIndex = canonicalInsertIndexForSection(
+        currentItems,
+        ProjectSetlistSectionType.worship,
+      );
       final referenceLinks = _parseReferenceLinks(
         _referenceLinksController.text,
       );
 
-      await setlistRef.add({
-        'order': nextOrder,
-        'cueLabel': cueInput.cueLabel ?? nextOrder.toString(),
-        'songId': songId,
-        'freeTextTitle': null,
-        'displayTitle': displayTitle,
-        'sectionType': ProjectSetlistSectionType.worship.toFirestoreValue(),
-        'keyText': parsed.keyText == null
-            ? null
-            : normalizeKeyText(parsed.keyText!),
-        'memoShared': _memoController.text.trim(),
-        if (referenceLinks.isNotEmpty) 'referenceLinks': referenceLinks,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+      await insertCanonicalSetlistItems(
+        firestore,
+        items: currentItems,
+        insertIndex: insertIndex,
+        inserts: [
+          CanonicalSetlistPendingInsert(
+            reference: setlistRef.doc(),
+            data: {
+              'cueLabel': cueInput.cueLabel ?? nextCueLabelOrder.toString(),
+              'songId': songId,
+              'freeTextTitle': null,
+              'displayTitle': displayTitle,
+              'sectionType': ProjectSetlistSectionType.worship
+                  .toFirestoreValue(),
+              'keyText': parsed.keyText == null
+                  ? null
+                  : normalizeKeyText(parsed.keyText!),
+              'memoShared': _memoController.text.trim(),
+              if (referenceLinks.isNotEmpty) 'referenceLinks': referenceLinks,
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+          ),
+        ],
+      );
 
       await _syncLiveCueFromSetlist(firestore);
 
@@ -735,12 +746,15 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
           .collection('segmentA_setlist');
 
       final currentItems = await _loadSetlist(firestore);
-      var orderCursor = currentItems.isEmpty
+      var cueLabelCursor = currentItems.isEmpty
           ? 0
           : (currentItems.last.data()['order'] as num?)?.toInt() ??
                 currentItems.length;
-
-      final batch = firestore.batch();
+      final insertIndex = canonicalInsertIndexForSection(
+        currentItems,
+        ProjectSetlistSectionType.worship,
+      );
+      final inserts = <CanonicalSetlistPendingInsert>[];
       var addedCount = 0;
       final skipped = <String>[];
 
@@ -751,19 +765,23 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
           continue;
         }
 
-        orderCursor += 1;
-        final docRef = setlistRef.doc();
-        batch.set(docRef, {
-          'order': orderCursor,
-          'cueLabel': resolved.cueLabel ?? orderCursor.toString(),
-          'songId': resolved.songId,
-          'freeTextTitle': resolved.freeTextTitle,
-          'displayTitle': resolved.displayTitle,
-          'sectionType': ProjectSetlistSectionType.worship.toFirestoreValue(),
-          'keyText': resolved.keyText,
-          'memoShared': '',
-          'createdAt': FieldValue.serverTimestamp(),
-        });
+        cueLabelCursor += 1;
+        inserts.add(
+          CanonicalSetlistPendingInsert(
+            reference: setlistRef.doc(),
+            data: {
+              'cueLabel': resolved.cueLabel ?? cueLabelCursor.toString(),
+              'songId': resolved.songId,
+              'freeTextTitle': resolved.freeTextTitle,
+              'displayTitle': resolved.displayTitle,
+              'sectionType': ProjectSetlistSectionType.worship
+                  .toFirestoreValue(),
+              'keyText': resolved.keyText,
+              'memoShared': '',
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+          ),
+        );
         addedCount += 1;
       }
 
@@ -776,7 +794,12 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
         return;
       }
 
-      await batch.commit();
+      await insertCanonicalSetlistItems(
+        firestore,
+        items: currentItems,
+        insertIndex: insertIndex,
+        inserts: inserts,
+      );
       await _syncLiveCueFromSetlist(firestore);
 
       _bulkSetlistInputController.clear();
@@ -1236,14 +1259,13 @@ class _SegmentAPageState extends ConsumerState<SegmentAPage> {
     if (confirm != true) return;
 
     final firestore = ref.read(firestoreProvider);
-    await firestore
-        .collection('teams')
-        .doc(widget.teamId)
-        .collection('projects')
-        .doc(widget.projectId)
-        .collection('segmentA_setlist')
-        .doc(itemDoc.id)
-        .delete();
+    final items = await _loadSetlist(firestore);
+    final remaining = items.where((doc) => doc.id != itemDoc.id).toList();
+    await commitCanonicalSetlistOrder(
+      firestore,
+      items: remaining,
+      deleteRef: itemDoc.reference,
+    );
     await _syncLiveCueFromSetlist(firestore);
     if (!context.mounted) return;
     setState(() {});

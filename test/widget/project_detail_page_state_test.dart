@@ -3,6 +3,7 @@ import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:go_router/go_router.dart';
 import 'package:worshipflow/features/projects/project_detail_page.dart';
 import 'package:worshipflow/services/firebase_providers.dart';
 
@@ -32,6 +33,49 @@ Future<void> _pumpProjectDetail(
   );
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpAndSettle(const Duration(milliseconds: 700));
+}
+
+Future<GoRouter> _pumpProjectDetailWithRouter(
+  WidgetTester tester, {
+  required FakeFirebaseFirestore firestore,
+  required String teamId,
+  required String projectId,
+  required String uid,
+  required String email,
+}) async {
+  final router = GoRouter(
+    initialLocation: '/teams/$teamId/projects/$projectId',
+    routes: [
+      GoRoute(
+        path: '/teams/:teamId',
+        builder: (_, state) =>
+            Scaffold(body: Text('team-home-${state.pathParameters['teamId']}')),
+      ),
+      GoRoute(
+        path: '/teams/:teamId/projects/:projectId',
+        builder: (_, state) => ProjectDetailPage(
+          teamId: state.pathParameters['teamId']!,
+          projectId: state.pathParameters['projectId']!,
+        ),
+      ),
+    ],
+  );
+
+  await tester.binding.setSurfaceSize(const Size(1400, 2200));
+  addTearDown(() => tester.binding.setSurfaceSize(null));
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        firebaseAuthProvider.overrideWithValue(
+          buildSignedInAuth(uid: uid, email: email, displayName: 'User-$uid'),
+        ),
+        firestoreProvider.overrideWithValue(firestore),
+      ],
+      child: MaterialApp.router(routerConfig: router),
+    ),
+  );
+  await tester.pumpAndSettle(const Duration(milliseconds: 700));
+  return router;
 }
 
 void main() {
@@ -155,4 +199,58 @@ void main() {
     expect(find.text('프로젝트를 찾을 수 없습니다'), findsOneWidget);
     expect(find.textContaining('최신 프로젝트 열기'), findsOneWidget);
   });
+
+  testWidgets(
+    'queues project delete from project detail and returns to team home',
+    (tester) async {
+      final firestore = FakeFirebaseFirestore();
+      await firestore.collection('teams').doc('team-a').set({
+        'name': 'Alpha',
+        'createdBy': 'u-1',
+      });
+      await firestore
+          .collection('teams')
+          .doc('team-a')
+          .collection('members')
+          .doc('u-1')
+          .set({'role': 'admin', 'displayName': 'Leader', 'userId': 'u-1'});
+      await firestore
+          .collection('teams')
+          .doc('team-a')
+          .collection('projects')
+          .doc('p-1')
+          .set({
+            'date': '2026.03.04',
+            'title': '금요예배',
+            'leaderUserId': 'u-1',
+            'createdAt': Timestamp.now(),
+          });
+
+      final router = await _pumpProjectDetailWithRouter(
+        tester,
+        firestore: firestore,
+        teamId: 'team-a',
+        projectId: 'p-1',
+        uid: 'u-1',
+        email: 'u1@example.com',
+      );
+
+      await tester.tap(find.text('프로젝트 삭제 요청'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '삭제 요청'));
+      await tester.pumpAndSettle();
+
+      final queueSnapshot = await firestore
+          .collection('teams')
+          .doc('team-a')
+          .collection('deleteQueue')
+          .get();
+      expect(queueSnapshot.docs, hasLength(1));
+      expect(queueSnapshot.docs.first.data()['type'], 'projectDelete');
+      expect(queueSnapshot.docs.first.data()['projectId'], 'p-1');
+      expect(queueSnapshot.docs.first.data()['status'], 'queued');
+      expect(router.routeInformationProvider.value.uri.path, '/teams/team-a');
+      expect(find.text('team-home-team-a'), findsOneWidget);
+    },
+  );
 }

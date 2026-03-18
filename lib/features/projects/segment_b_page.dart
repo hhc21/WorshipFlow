@@ -8,6 +8,7 @@ import '../../services/firebase_providers.dart';
 import '../../services/song_search.dart';
 import '../../utils/song_parser.dart';
 import 'models/project_setlist_section_type.dart';
+import 'setlist_ordering_helpers.dart';
 
 class SegmentBPage extends ConsumerStatefulWidget {
   final String teamId;
@@ -105,6 +106,15 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
     return normalizeKeyText(value);
   }
 
+  String _displayOrderLabelFromItem(
+    Map<String, dynamic> item, {
+    required int fallbackOrder,
+  }) {
+    final order = item['order'];
+    if (order is num) return order.toInt().toString();
+    return fallbackOrder.toString();
+  }
+
   Future<List<QueryDocumentSnapshot<Map<String, dynamic>>>> _loadItems(
     FirebaseFirestore firestore,
   ) async {
@@ -153,19 +163,32 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
           ? 0
           : (currentItems.last.data()['order'] as num?)?.toInt() ??
                 currentItems.length;
-      final nextOrder = lastOrder + 1;
+      final nextCueLabelOrder = lastOrder + 1;
+      final insertIndex = canonicalInsertIndexForSection(
+        currentItems,
+        ProjectSetlistSectionType.sermonResponse,
+      );
 
-      await _canonicalSetlistRef(firestore).add({
-        'order': nextOrder,
-        'cueLabel': nextOrder.toString(),
-        'songId': songId,
-        'freeTextTitle': songId == null ? parsed.title : null,
-        'displayTitle': displayTitle,
-        'keyText': normalizedKey,
-        'sectionType': ProjectSetlistSectionType.sermonResponse
-            .toFirestoreValue(),
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+      await insertCanonicalSetlistItems(
+        firestore,
+        items: currentItems,
+        insertIndex: insertIndex,
+        inserts: [
+          CanonicalSetlistPendingInsert(
+            reference: _canonicalSetlistRef(firestore).doc(),
+            data: {
+              'cueLabel': nextCueLabelOrder.toString(),
+              'songId': songId,
+              'freeTextTitle': songId == null ? parsed.title : null,
+              'displayTitle': displayTitle,
+              'keyText': normalizedKey,
+              'sectionType': ProjectSetlistSectionType.sermonResponse
+                  .toFirestoreValue(),
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+          ),
+        ],
+      );
 
       _inputController.clear();
       if (!context.mounted) return;
@@ -252,12 +275,15 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
 
     try {
       final currentItems = await _loadItems(firestore);
-      var orderCursor = currentItems.isEmpty
+      var cueLabelCursor = currentItems.isEmpty
           ? 0
           : (currentItems.last.data()['order'] as num?)?.toInt() ??
                 currentItems.length;
-
-      final batch = firestore.batch();
+      final insertIndex = canonicalInsertIndexForSection(
+        currentItems,
+        ProjectSetlistSectionType.sermonResponse,
+      );
+      final inserts = <CanonicalSetlistPendingInsert>[];
       var addedCount = 0;
       final skipped = <String>[];
 
@@ -267,18 +293,22 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
           skipped.add(line);
           continue;
         }
-        orderCursor += 1;
-        batch.set(_canonicalSetlistRef(firestore).doc(), {
-          'order': orderCursor,
-          'cueLabel': orderCursor.toString(),
-          'songId': resolved.songId,
-          'freeTextTitle': resolved.freeTextTitle,
-          'displayTitle': resolved.displayTitle,
-          'keyText': resolved.keyText,
-          'sectionType': ProjectSetlistSectionType.sermonResponse
-              .toFirestoreValue(),
-          'createdAt': FieldValue.serverTimestamp(),
-        });
+        cueLabelCursor += 1;
+        inserts.add(
+          CanonicalSetlistPendingInsert(
+            reference: _canonicalSetlistRef(firestore).doc(),
+            data: {
+              'cueLabel': cueLabelCursor.toString(),
+              'songId': resolved.songId,
+              'freeTextTitle': resolved.freeTextTitle,
+              'displayTitle': resolved.displayTitle,
+              'keyText': resolved.keyText,
+              'sectionType': ProjectSetlistSectionType.sermonResponse
+                  .toFirestoreValue(),
+              'createdAt': FieldValue.serverTimestamp(),
+            },
+          ),
+        );
         addedCount += 1;
       }
 
@@ -291,7 +321,12 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
         return;
       }
 
-      await batch.commit();
+      await insertCanonicalSetlistItems(
+        firestore,
+        items: currentItems,
+        insertIndex: insertIndex,
+        inserts: inserts,
+      );
       _bulkInputController.clear();
       if (!context.mounted) return;
       final skippedInfo = skipped.isEmpty ? '' : ' (건너뜀 ${skipped.length}줄)';
@@ -332,11 +367,7 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
 
     setState(() => _saving = true);
     try {
-      final batch = firestore.batch();
-      for (var i = 0; i < reordered.length; i++) {
-        batch.update(reordered[i].reference, {'order': i + 1});
-      }
-      await batch.commit();
+      await reindexCanonicalSetlistOrder(firestore, reordered);
       if (!mounted) return;
       setState(() {});
     } finally {
@@ -372,7 +403,14 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
 
     setState(() => _saving = true);
     try {
-      await itemDoc.reference.delete();
+      final firestore = ref.read(firestoreProvider);
+      final items = await _loadItems(firestore);
+      final remaining = items.where((doc) => doc.id != itemDoc.id).toList();
+      await commitCanonicalSetlistOrder(
+        firestore,
+        items: remaining,
+        deleteRef: itemDoc.reference,
+      );
       if (!mounted) return;
       setState(() {});
     } finally {
@@ -528,16 +566,17 @@ class _SegmentBPageState extends ConsumerState<SegmentBPage> {
                     data['displayTitle']?.toString() ??
                     data['freeTextTitle']?.toString() ??
                     '곡';
+                final cueLabel = _displayOrderLabelFromItem(
+                  data,
+                  fallbackOrder: globalIndex + 1,
+                );
                 final songId = data['songId']?.toString();
                 final sectionType = _sectionTypeFromItem(data);
                 final query = (key == null || key.isEmpty)
                     ? ''
                     : '?key=${Uri.encodeComponent(key)}';
                 return AppActionListTile(
-                  title: Text(
-                    '${data['cueLabel'] ?? data['order']} ${key ?? ''} $title'
-                        .trim(),
-                  ),
+                  title: Text('$cueLabel ${key ?? ''} $title'.trim()),
                   subtitle: Wrap(
                     spacing: 8,
                     runSpacing: 6,
