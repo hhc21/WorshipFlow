@@ -24,6 +24,12 @@ Future<({FakeFirebaseFirestore firestore, GoRouter router})> _pumpLiveCueApp(
   WidgetTester tester, {
   Map<String, Object?>? liveCueStateOverride,
 }) async {
+  tester.view.physicalSize = const Size(1600, 1200);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(() {
+    tester.view.resetPhysicalSize();
+    tester.view.resetDevicePixelRatio();
+  });
   final firestore = FakeFirebaseFirestore();
   final auth = buildSignedInAuth(
     uid: 'leader-1',
@@ -223,6 +229,49 @@ void main() {
     );
     expect(find.text('다시 불러오기'), findsOneWidget);
   });
+
+  testWidgets(
+    'live cue e2e: delete reindexes canonical order badges immediately',
+    (tester) async {
+      final app = await _pumpLiveCueApp(tester);
+
+      await app.firestore
+          .collection('teams')
+          .doc('team-a')
+          .collection('projects')
+          .doc('p-1')
+          .collection('segmentA_setlist')
+          .doc('line-3')
+          .set({
+            'order': 3,
+            'displayTitle': '기도 곡',
+            'freeTextTitle': '기도 곡',
+            'keyText': 'F',
+            'sectionType': 'prayer',
+          });
+      await _pumpLoading(tester, ticks: 10);
+
+      final deleteButton = find.byTooltip('삭제').at(1);
+      await tester.ensureVisible(deleteButton);
+      await tester.tap(deleteButton);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(ElevatedButton, '삭제'));
+      await tester.pumpAndSettle();
+      await _pumpLoading(tester, ticks: 8);
+
+      final reordered = await app.firestore
+          .collection('teams')
+          .doc('team-a')
+          .collection('projects')
+          .doc('p-1')
+          .collection('segmentA_setlist')
+          .orderBy('order')
+          .get();
+      expect(reordered.docs.map((doc) => doc.data()['order']).toList(), [1, 2]);
+      expect(find.text('전체 순서 3'), findsNothing);
+      expect(find.textContaining('기도 곡'), findsWidgets);
+    },
+  );
 
   testWidgets(
     'live cue e2e: stale cue title without songId falls back to setlist current',

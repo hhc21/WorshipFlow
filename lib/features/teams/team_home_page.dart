@@ -9,6 +9,7 @@ import '../../app/ui_components.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
 import '../../services/ops_metrics.dart';
+import '../projects/project_delete_helpers.dart';
 import '../../utils/firestore_id.dart';
 import '../../utils/team_name.dart';
 import '../../utils/user_display_name.dart';
@@ -695,84 +696,75 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
         extra: <String, Object?>{'projectId': projectId},
       ),
     );
-    final currentUserId = ref.read(firebaseAuthProvider).currentUser?.uid ?? '';
     try {
-      if (currentUserId.isNotEmpty) {
-        try {
-          final requestId = await _enqueueDeleteRequest(
-            firestore: firestore,
-            requestedBy: currentUserId,
-            type: 'projectDelete',
-            projectId: projectId,
-          );
-          unawaited(
-            logTeamOpsMetric(
-              firestore: firestore,
-              teamId: widget.teamId,
-              category: 'delete',
-              action: 'project_delete',
-              status: 'queued',
-              extra: <String, Object?>{
-                'projectId': projectId,
-                'requestId': requestId,
-              },
-            ),
-          );
-          if (!context.mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                '프로젝트 삭제 요청이 접수되었습니다. 요청 ID: $requestId (상태: queued)',
-              ),
-            ),
-          );
-          _refreshPageState();
-          return;
-        } on FirebaseException catch (error) {
-          unawaited(
-            logTeamOpsMetric(
-              firestore: firestore,
-              teamId: widget.teamId,
-              category: 'delete',
-              action: 'project_delete',
-              status: 'failed',
-              code: error.code,
-              extra: <String, Object?>{'projectId': projectId},
-            ),
-          );
-          if (!context.mounted) return;
-          final message = error.code == 'permission-denied'
-              ? '삭제 큐 요청 권한이 없습니다. 운영자에게 deleteQueue 권한 설정을 요청해 주세요.'
-              : '프로젝트 삭제 큐 요청 실패: ${error.message ?? error.code}';
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(message)));
-        } catch (error) {
-          unawaited(
-            logTeamOpsMetric(
-              firestore: firestore,
-              teamId: widget.teamId,
-              category: 'delete',
-              action: 'project_delete',
-              status: 'failed',
-              code: 'unknown',
-              extra: <String, Object?>{
-                'projectId': projectId,
-                'error': error.toString(),
-              },
-            ),
-          );
-          if (!context.mounted) return;
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('프로젝트 삭제 큐 요청 실패: $error')));
-        }
-      } else {
+      final currentUserId =
+          ref.read(firebaseAuthProvider).currentUser?.uid ?? '';
+      if (currentUserId.isEmpty) {
         if (!context.mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('로그인 정보가 없어 삭제 큐 요청을 생성할 수 없습니다.')),
+          const SnackBar(content: Text('로그인 정보가 없어 프로젝트를 삭제할 수 없습니다.')),
         );
+        return;
       }
+
+      await deleteProjectDirectly(
+        firestore: firestore,
+        teamId: widget.teamId,
+        projectId: projectId,
+      );
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: widget.teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'deleted',
+          extra: <String, Object?>{'projectId': projectId},
+        ),
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('프로젝트를 삭제했습니다.')));
+      _refreshPageState();
+    } on FirebaseException catch (error) {
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: widget.teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'failed',
+          code: error.code,
+          extra: <String, Object?>{'projectId': projectId},
+        ),
+      );
+      if (!context.mounted) return;
+      final message = error.code == 'permission-denied'
+          ? '프로젝트 삭제 권한이 없습니다.'
+          : '프로젝트 삭제 실패: ${error.message ?? error.code}';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: widget.teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'failed',
+          code: 'unknown',
+          extra: <String, Object?>{
+            'projectId': projectId,
+            'error': error.toString(),
+          },
+        ),
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('프로젝트 삭제 실패: $error')));
     } finally {
       if (mounted) {
         setState(() => _deletingProjectIds.remove(projectId));
@@ -1203,8 +1195,9 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
                             final deletingProject = _deletingProjectIds
                                 .contains(doc.id);
                             final canDeleteProject =
-                                isAdmin ||
                                 data['leaderUserId']?.toString() == user.uid;
+                            const compactActionConstraints =
+                                BoxConstraints.tightFor(width: 40, height: 40);
                             return Container(
                               decoration: BoxDecoration(
                                 color: Theme.of(context)
@@ -1226,6 +1219,9 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
                                           doc.id,
                                           data,
                                         ),
+                                        padding: EdgeInsets.zero,
+                                        constraints: compactActionConstraints,
+                                        visualDensity: VisualDensity.compact,
                                         icon: const Icon(Icons.manage_accounts),
                                         tooltip: '인도자 변경',
                                       ),
@@ -1238,6 +1234,9 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
                                                 projectId: doc.id,
                                                 projectLabel: projectLabel,
                                               ),
+                                        padding: EdgeInsets.zero,
+                                        constraints: compactActionConstraints,
+                                        visualDensity: VisualDensity.compact,
                                         icon: deletingProject
                                             ? const SizedBox(
                                                 width: 18,
@@ -1254,6 +1253,9 @@ class _TeamHomePageState extends ConsumerState<TeamHomePage> {
                                       onPressed: () => context.go(
                                         '/teams/${widget.teamId}/projects/${doc.id}',
                                       ),
+                                      padding: EdgeInsets.zero,
+                                      constraints: compactActionConstraints,
+                                      visualDensity: VisualDensity.compact,
                                       icon: const Icon(Icons.chevron_right),
                                       tooltip: '프로젝트 이동',
                                     ),

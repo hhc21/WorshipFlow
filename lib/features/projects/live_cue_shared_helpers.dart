@@ -1,5 +1,13 @@
 part of 'live_cue_page.dart';
 
+bool supportsLiveCueDrawingPointer(PointerDeviceKind kind) {
+  return kind == PointerDeviceKind.mouse ||
+      kind == PointerDeviceKind.touch ||
+      kind == PointerDeviceKind.stylus ||
+      kind == PointerDeviceKind.invertedStylus ||
+      kind == PointerDeviceKind.unknown;
+}
+
 DocumentReference<Map<String, dynamic>> _liveCueRefFor(
   FirebaseFirestore firestore,
   String teamId,

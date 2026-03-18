@@ -252,6 +252,129 @@ void main() {
     expect(find.byTooltip('아래로 이동'), findsWidgets);
   });
 
+  testWidgets('new worship item inserts before applied section items', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore.collection('songs').doc('song-new').set({
+      'title': '새 찬양',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['새 찬양'],
+    });
+    final setlistRef = firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist');
+
+    await setlistRef.doc('w-1').set({
+      'order': 1,
+      'cueLabel': '1',
+      'displayTitle': '예배 찬양 1',
+      'freeTextTitle': '예배 찬양 1',
+      'sectionType': 'worship',
+    });
+    await setlistRef.doc('w-2').set({
+      'order': 2,
+      'cueLabel': '2',
+      'displayTitle': '예배 찬양 2',
+      'freeTextTitle': '예배 찬양 2',
+      'sectionType': 'worship',
+    });
+    await setlistRef.doc('a-1').set({
+      'order': 3,
+      'cueLabel': '3',
+      'displayTitle': '응답 곡',
+      'freeTextTitle': '응답 곡',
+      'sectionType': 'sermon_response',
+    });
+    await setlistRef.doc('a-2').set({
+      'order': 4,
+      'cueLabel': '4',
+      'displayTitle': '기도 곡',
+      'freeTextTitle': '기도 곡',
+      'sectionType': 'prayer',
+    });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    await tester.enterText(fieldByLabel('콘티 입력'), '새 찬양');
+    await tester.tap(find.text('콘티 추가').first);
+    await tester.pumpAndSettle();
+
+    final snapshot = await setlistRef.orderBy('order').get();
+    expect(snapshot.docs.map((doc) => doc.data()['displayTitle']).toList(), [
+      '예배 찬양 1',
+      '예배 찬양 2',
+      '새 찬양',
+      '응답 곡',
+      '기도 곡',
+    ]);
+    expect(snapshot.docs.map((doc) => doc.data()['order']).toList(), [
+      1,
+      2,
+      3,
+      4,
+      5,
+    ]);
+    expect(snapshot.docs[2].data()['sectionType'], 'worship');
+    expect(find.text('전체 순서 3'), findsOneWidget);
+    expect(find.textContaining('새 찬양'), findsOneWidget);
+  });
+
+  testWidgets('delete immediately reindexes canonical order in worship view', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    final setlistRef = firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist');
+
+    await setlistRef.doc('w-1').set({
+      'order': 1,
+      'cueLabel': '1',
+      'displayTitle': '첫 곡',
+      'freeTextTitle': '첫 곡',
+      'keyText': 'C',
+      'sectionType': 'worship',
+    });
+    await setlistRef.doc('w-2').set({
+      'order': 2,
+      'cueLabel': '2',
+      'displayTitle': '둘째 곡',
+      'freeTextTitle': '둘째 곡',
+      'keyText': 'D',
+      'sectionType': 'worship',
+    });
+    await setlistRef.doc('w-3').set({
+      'order': 3,
+      'cueLabel': '3',
+      'displayTitle': '셋째 곡',
+      'freeTextTitle': '셋째 곡',
+      'keyText': 'E',
+      'sectionType': 'worship',
+    });
+
+    await pumpSegmentAPage(tester, firestore);
+
+    await tester.tap(find.byTooltip('삭제').at(1));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ElevatedButton, '삭제'));
+    await tester.pumpAndSettle();
+
+    final snapshot = await setlistRef.orderBy('order').get();
+    expect(snapshot.docs.map((doc) => doc.data()['order']).toList(), [1, 2]);
+    expect(find.text('전체 순서 3'), findsNothing);
+    expect(find.text('전체 순서 2'), findsOneWidget);
+    expect(find.textContaining('셋째 곡'), findsOneWidget);
+  });
+
   testWidgets('pre-service tab filters out non-worship section items', (
     tester,
   ) async {

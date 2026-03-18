@@ -195,5 +195,77 @@ void main() {
         .orderBy('order')
         .get();
     expect(afterDelete.docs, hasLength(2));
+    expect(afterDelete.docs.map((doc) => doc.data()['order']).toList(), [1, 2]);
+    expect(find.text('전체 순서 3'), findsNothing);
+  });
+
+  testWidgets('application insert stays inside applied section block', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await seedProject(firestore);
+    await firestore.collection('songs').doc('song-new').set({
+      'title': '새 응답 곡',
+      'aliases': const <String>[],
+      'searchTokens': const <String>['새 응답 곡'],
+    });
+    final setlistRef = firestore
+        .collection('teams')
+        .doc(teamId)
+        .collection('projects')
+        .doc(projectId)
+        .collection('segmentA_setlist');
+
+    await setlistRef.doc('w-1').set({
+      'order': 1,
+      'cueLabel': '1',
+      'displayTitle': '앞 찬양',
+      'freeTextTitle': '앞 찬양',
+      'sectionType': 'worship',
+    });
+    await setlistRef.doc('r-1').set({
+      'order': 2,
+      'cueLabel': '2',
+      'displayTitle': '응답 곡',
+      'freeTextTitle': '응답 곡',
+      'sectionType': 'sermon_response',
+    });
+    await setlistRef.doc('p-1').set({
+      'order': 3,
+      'cueLabel': '3',
+      'displayTitle': '기도 곡',
+      'freeTextTitle': '기도 곡',
+      'sectionType': 'prayer',
+    });
+    await setlistRef.doc('w-2').set({
+      'order': 4,
+      'cueLabel': '4',
+      'displayTitle': '뒤 찬양',
+      'freeTextTitle': '뒤 찬양',
+      'sectionType': 'worship',
+    });
+
+    await pumpSegmentBPage(tester, firestore);
+
+    await tester.enterText(fieldByLabel('적용찬양 입력'), '새 응답 곡');
+    await tester.tap(find.text('적용찬양 추가').first);
+    await tester.pumpAndSettle();
+
+    final snapshot = await setlistRef.orderBy('order').get();
+    expect(snapshot.docs.map((doc) => doc.data()['displayTitle']).toList(), [
+      '앞 찬양',
+      '응답 곡',
+      '기도 곡',
+      '새 응답 곡',
+      '뒤 찬양',
+    ]);
+    expect(snapshot.docs.map((doc) => doc.data()['order']).toList(), [
+      1,
+      2,
+      3,
+      4,
+      5,
+    ]);
+    expect(snapshot.docs[3].data()['sectionType'], 'sermon_response');
   });
 }

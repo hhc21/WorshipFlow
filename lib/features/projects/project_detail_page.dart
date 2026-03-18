@@ -9,7 +9,9 @@ import '../../app/ui_components.dart';
 import '../../core/ops/ops_metrics.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
+import '../../services/ops_metrics.dart';
 import 'live_cue_page.dart';
+import 'project_delete_helpers.dart';
 import 'segment_a_page.dart';
 import 'segment_b_page.dart';
 
@@ -71,6 +73,115 @@ class ProjectDetailPage extends ConsumerWidget {
       // Ignore and return null below.
     }
     return null;
+  }
+
+  Future<void> _confirmAndDeleteProject(
+    BuildContext context,
+    WidgetRef ref, {
+    required String projectLabel,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('프로젝트 삭제'),
+        content: Text(
+          '"$projectLabel" 프로젝트를 즉시 삭제합니다.\n'
+          '콘티, LiveCue 상태, 메모 레이어가 함께 삭제되며 되돌릴 수 없습니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('취소'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    final firestore = ref.read(firestoreProvider);
+    final currentUserId = ref.read(firebaseAuthProvider).currentUser?.uid ?? '';
+    if (currentUserId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('로그인 정보가 없어 프로젝트를 삭제할 수 없습니다.')),
+      );
+      return;
+    }
+
+    unawaited(
+      logTeamOpsMetric(
+        firestore: firestore,
+        teamId: teamId,
+        category: 'delete',
+        action: 'project_delete',
+        status: 'started',
+        extra: <String, Object?>{'projectId': projectId},
+      ),
+    );
+
+    try {
+      await deleteProjectDirectly(
+        firestore: firestore,
+        teamId: teamId,
+        projectId: projectId,
+      );
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'deleted',
+          extra: <String, Object?>{'projectId': projectId},
+        ),
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('프로젝트를 삭제했습니다.')));
+      context.go('/teams/$teamId');
+    } on FirebaseException catch (error) {
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'failed',
+          code: error.code,
+          extra: <String, Object?>{'projectId': projectId},
+        ),
+      );
+      if (!context.mounted) return;
+      final message = error.code == 'permission-denied'
+          ? '프로젝트 삭제 권한이 없습니다.'
+          : '프로젝트 삭제 실패: ${error.message ?? error.code}';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      unawaited(
+        logTeamOpsMetric(
+          firestore: firestore,
+          teamId: teamId,
+          category: 'delete',
+          action: 'project_delete',
+          status: 'failed',
+          code: 'unknown',
+          extra: <String, Object?>{
+            'projectId': projectId,
+            'error': error.toString(),
+          },
+        ),
+      );
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('프로젝트 삭제 실패: $error')));
+    }
   }
 
   @override
@@ -191,11 +302,11 @@ class ProjectDetailPage extends ConsumerWidget {
             ? projectDate
             : '$projectDate $projectTitle';
         final leaderId = projectData['leaderUserId']?.toString();
-        final isLeader = leaderId == user.uid;
+        final isProjectLeader = leaderId == user.uid;
         final role = contextData.member.data()?['role']?.toString();
         final isAdmin = contextData.isTeamCreator || isAdminRole(role);
-        final canEdit = isLeader || isAdmin;
-        final roleLabel = isAdmin ? '팀장' : (isLeader ? '인도자' : '팀원');
+        final canEdit = isProjectLeader || isAdmin;
+        final roleLabel = isAdmin ? '팀장' : (isProjectLeader ? '인도자' : '팀원');
 
         return DefaultTabController(
           length: 3,
@@ -237,6 +348,16 @@ class ProjectDetailPage extends ConsumerWidget {
                         icon: const Icon(Icons.arrow_back_rounded),
                         label: const Text('팀 홈'),
                       ),
+                      if (isProjectLeader)
+                        FilledButton.tonalIcon(
+                          onPressed: () => _confirmAndDeleteProject(
+                            context,
+                            ref,
+                            projectLabel: projectLabel,
+                          ),
+                          icon: const Icon(Icons.delete_outline_rounded),
+                          label: const Text('프로젝트 삭제'),
+                        ),
                       FilledButton.icon(
                         onPressed: () => context.go(
                           '/teams/$teamId/projects/$projectId/live',

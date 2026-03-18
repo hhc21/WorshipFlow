@@ -21,6 +21,7 @@ import '../../utils/browser_helpers.dart';
 import '../../utils/song_parser.dart';
 import '../../utils/storage_helpers.dart';
 import 'live_cue_note_persistence_adapter.dart';
+import 'setlist_ordering_helpers.dart';
 import 'models/project_setlist_section_type.dart';
 import 'models/setlist_music_metadata.dart';
 import 'models/sketch_stroke.dart';
@@ -432,11 +433,7 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
 
     setState(() => _setlistMutationInFlight = true);
     try {
-      final batch = firestore.batch();
-      for (var i = 0; i < reordered.length; i++) {
-        batch.update(reordered[i].reference, {'order': i + 1});
-      }
-      await batch.commit();
+      await reindexCanonicalSetlistOrder(firestore, reordered);
 
       final refreshed = await _loadSetlist(firestore);
       final validation = RuntimeGuard.validateSetlistOrder(
@@ -496,11 +493,17 @@ class _LiveCuePageState extends ConsumerState<LiveCuePage> {
 
     setState(() => _setlistMutationInFlight = true);
     try {
-      await itemDoc.reference.delete();
-      final refreshed = await _loadSetlist(firestore);
+      final items = await _loadSetlist(firestore);
+      final remaining = items.where((doc) => doc.id != itemDoc.id).toList();
+      await commitCanonicalSetlistOrder(
+        firestore,
+        items: remaining,
+        deleteRef: itemDoc.reference,
+      );
+      final normalized = await _loadSetlist(firestore);
       await _syncLiveCueAfterSetlistMutation(
         firestore,
-        refreshed,
+        normalized,
         source: 'livecue_operator_delete',
       );
       if (!mounted) return;
@@ -651,10 +654,7 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
   }
 
   bool _supportsDrawingPointer(PointerDeviceKind kind) {
-    return kind == PointerDeviceKind.touch ||
-        kind == PointerDeviceKind.stylus ||
-        kind == PointerDeviceKind.invertedStylus ||
-        kind == PointerDeviceKind.unknown;
+    return supportsLiveCueDrawingPointer(kind);
   }
 
   @override
@@ -878,6 +878,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     if (!mounted) return;
     if (_nextViewerDirty == dirty) return;
     _nextViewerDirty = dirty;
+    _markOverlayNeedsBuild();
+  }
+
+  void _markNextViewerInkSaved() {
+    if (!mounted) return;
+    _nextViewerDirty = false;
+    _nextViewerSyncRevision = _nextViewerSyncRevision + 1;
+    _markViewerNeedsBuild();
     _markOverlayNeedsBuild();
   }
 
