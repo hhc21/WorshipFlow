@@ -881,6 +881,14 @@ class _LiveCueFullScreenPageState extends ConsumerState<LiveCueFullScreenPage>
     _markOverlayNeedsBuild();
   }
 
+  void _markNextViewerInkSaved() {
+    if (!mounted) return;
+    _nextViewerDirty = false;
+    _nextViewerSyncRevision = _nextViewerSyncRevision + 1;
+    _markViewerNeedsBuild();
+    _markOverlayNeedsBuild();
+  }
+
   void _onNextViewerAssetError(NextViewerAssetError error) {
     if (!mounted) return;
     if (!_useNextViewer) return;

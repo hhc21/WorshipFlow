@@ -216,7 +216,7 @@ Widget _buildLiveCueFullScreenPage(
   final undoLayerStroke = state._undoLayerStroke;
   final clearLayerStroke = state._clearLayerStroke;
   final markViewerNeedsBuild = state._markViewerNeedsBuild;
-  final markOverlayNeedsBuild = state._markOverlayNeedsBuild;
+  final markNextViewerInkSaved = state._markNextViewerInkSaved;
   final focusNode = state._focusNode;
   final canRenderPreviewBeforeSync = state._canRenderPreviewBeforeSync;
   final seedFromSetlistIfNeeded = state._seedFromSetlistIfNeeded;
@@ -1628,51 +1628,74 @@ Widget _buildLiveCueFullScreenPage(
                                                         ],
                                                       ),
                                                       const SizedBox(height: 8),
-                                                      Align(
-                                                        alignment: Alignment
-                                                            .centerLeft,
-                                                        child: FilledButton.icon(
-                                                          onPressed:
-                                                              savingNoteLayers
-                                                              ? null
-                                                              : () async {
-                                                                  final saved = await saveLayerNotes(
-                                                                    notePersistence,
-                                                                    user.uid,
-                                                                    saveBothLayers:
-                                                                        true,
-                                                                  );
-                                                                  if (!saved ||
-                                                                      !state
-                                                                          .mounted) {
-                                                                    return;
-                                                                  }
-                                                                  state._nextViewerDirty =
-                                                                      false;
-                                                                  state._nextViewerSyncRevision =
-                                                                      state
-                                                                          ._nextViewerSyncRevision +
-                                                                      1;
-                                                                  markViewerNeedsBuild();
-                                                                  markOverlayNeedsBuild();
-                                                                },
-                                                          icon: savingNoteLayers
-                                                              ? const SizedBox(
-                                                                  width: 14,
-                                                                  height: 14,
-                                                                  child: CircularProgressIndicator(
-                                                                    strokeWidth:
-                                                                        2,
+                                                      Wrap(
+                                                        spacing: 8,
+                                                        runSpacing: 8,
+                                                        children: [
+                                                          FilledButton.icon(
+                                                            onPressed:
+                                                                savingNoteLayers
+                                                                ? null
+                                                                : () async {
+                                                                    final saved =
+                                                                        await saveLayerNotes(
+                                                                          notePersistence,
+                                                                          user.uid,
+                                                                        );
+                                                                    if (!saved ||
+                                                                        !state
+                                                                            .mounted) {
+                                                                      return;
+                                                                    }
+                                                                    markNextViewerInkSaved();
+                                                                  },
+                                                            icon:
+                                                                savingNoteLayers
+                                                                ? const SizedBox(
+                                                                    width: 14,
+                                                                    height: 14,
+                                                                    child: CircularProgressIndicator(
+                                                                      strokeWidth:
+                                                                          2,
+                                                                    ),
+                                                                  )
+                                                                : const Icon(
+                                                                    Icons
+                                                                        .save_rounded,
                                                                   ),
-                                                                )
-                                                              : const Icon(
-                                                                  Icons
-                                                                      .save_rounded,
-                                                                ),
-                                                          label: const Text(
-                                                            '레이어 저장(개인+공유)',
+                                                            label: Text(
+                                                              editingSharedLayer
+                                                                  ? '공유 레이어 저장'
+                                                                  : '개인 레이어 저장',
+                                                            ),
                                                           ),
-                                                        ),
+                                                          FilledButton.tonalIcon(
+                                                            onPressed:
+                                                                savingNoteLayers
+                                                                ? null
+                                                                : () async {
+                                                                    final saved = await saveLayerNotes(
+                                                                      notePersistence,
+                                                                      user.uid,
+                                                                      saveBothLayers:
+                                                                          true,
+                                                                    );
+                                                                    if (!saved ||
+                                                                        !state
+                                                                            .mounted) {
+                                                                      return;
+                                                                    }
+                                                                    markNextViewerInkSaved();
+                                                                  },
+                                                            icon: const Icon(
+                                                              Icons
+                                                                  .layers_rounded,
+                                                            ),
+                                                            label: const Text(
+                                                              '개인+공유 저장',
+                                                            ),
+                                                          ),
+                                                        ],
                                                       ),
                                                     ] else ...[
                                                       Wrap(

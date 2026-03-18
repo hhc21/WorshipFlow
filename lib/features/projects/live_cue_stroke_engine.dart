@@ -62,21 +62,51 @@ class LiveCueStrokeEngine {
   }
 
   void setEditingSharedLayer(bool value) {
-    if (_editingSharedLayer == value) return;
+    var nextShowPrivate = _showPrivateLayer;
+    var nextShowShared = _showSharedLayer;
+    if (value && !nextShowShared) {
+      nextShowShared = true;
+    }
+    if (!value && !nextShowPrivate) {
+      nextShowPrivate = true;
+    }
+    if (_editingSharedLayer == value &&
+        _showPrivateLayer == nextShowPrivate &&
+        _showSharedLayer == nextShowShared) {
+      return;
+    }
     _editingSharedLayer = value;
+    _showPrivateLayer = nextShowPrivate;
+    _showSharedLayer = nextShowShared;
+    _bumpStrokeRevision();
     _bumpToolRevision();
   }
 
   void setLayerVisibility({bool? showPrivateLayer, bool? showSharedLayer}) {
+    var nextShowPrivate = showPrivateLayer ?? _showPrivateLayer;
+    var nextShowShared = showSharedLayer ?? _showSharedLayer;
+    if (!nextShowPrivate && !nextShowShared) {
+      if (_editingSharedLayer) {
+        nextShowShared = true;
+      } else {
+        nextShowPrivate = true;
+      }
+    }
+
     var changed = false;
-    if (showPrivateLayer != null) {
-      changed = changed || _showPrivateLayer != showPrivateLayer;
-      _showPrivateLayer = showPrivateLayer;
+    changed = changed || _showPrivateLayer != nextShowPrivate;
+    changed = changed || _showSharedLayer != nextShowShared;
+    _showPrivateLayer = nextShowPrivate;
+    _showSharedLayer = nextShowShared;
+
+    if (_showSharedLayer && !_showPrivateLayer && !_editingSharedLayer) {
+      _editingSharedLayer = true;
+      changed = true;
+    } else if (_showPrivateLayer && !_showSharedLayer && _editingSharedLayer) {
+      _editingSharedLayer = false;
+      changed = true;
     }
-    if (showSharedLayer != null) {
-      changed = changed || _showSharedLayer != showSharedLayer;
-      _showSharedLayer = showSharedLayer;
-    }
+
     if (!changed) return;
     _bumpToolRevision();
     _bumpStrokeRevision();

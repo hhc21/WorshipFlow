@@ -201,19 +201,19 @@ void main() {
   });
 
   testWidgets(
-    'queues project delete from project detail and returns to team home',
+    'directly deletes project from project detail for project leader and returns to team home',
     (tester) async {
       final firestore = FakeFirebaseFirestore();
       await firestore.collection('teams').doc('team-a').set({
         'name': 'Alpha',
-        'createdBy': 'u-1',
+        'createdBy': 'team-owner',
       });
       await firestore
           .collection('teams')
           .doc('team-a')
           .collection('members')
           .doc('u-1')
-          .set({'role': 'admin', 'displayName': 'Leader', 'userId': 'u-1'});
+          .set({'role': 'leader', 'displayName': 'Leader', 'userId': 'u-1'});
       await firestore
           .collection('teams')
           .doc('team-a')
@@ -235,22 +235,58 @@ void main() {
         email: 'u1@example.com',
       );
 
-      await tester.tap(find.text('프로젝트 삭제 요청'));
+      await tester.tap(find.text('프로젝트 삭제'));
       await tester.pumpAndSettle();
-      await tester.tap(find.widgetWithText(FilledButton, '삭제 요청'));
+      await tester.tap(find.widgetWithText(FilledButton, '삭제'));
       await tester.pumpAndSettle();
 
-      final queueSnapshot = await firestore
+      final deletedProject = await firestore
           .collection('teams')
           .doc('team-a')
-          .collection('deleteQueue')
+          .collection('projects')
+          .doc('p-1')
           .get();
-      expect(queueSnapshot.docs, hasLength(1));
-      expect(queueSnapshot.docs.first.data()['type'], 'projectDelete');
-      expect(queueSnapshot.docs.first.data()['projectId'], 'p-1');
-      expect(queueSnapshot.docs.first.data()['status'], 'queued');
+      expect(deletedProject.exists, isFalse);
       expect(router.routeInformationProvider.value.uri.path, '/teams/team-a');
       expect(find.text('team-home-team-a'), findsOneWidget);
     },
   );
+
+  testWidgets('admin who is not project leader cannot delete project', (
+    tester,
+  ) async {
+    final firestore = FakeFirebaseFirestore();
+    await firestore.collection('teams').doc('team-a').set({
+      'name': 'Alpha',
+      'createdBy': 'team-owner',
+    });
+    await firestore
+        .collection('teams')
+        .doc('team-a')
+        .collection('members')
+        .doc('u-2')
+        .set({'role': 'admin', 'displayName': '팀장', 'userId': 'u-2'});
+    await firestore
+        .collection('teams')
+        .doc('team-a')
+        .collection('projects')
+        .doc('p-1')
+        .set({
+          'date': '2026.03.04',
+          'title': '금요예배',
+          'leaderUserId': 'other-user',
+          'createdAt': Timestamp.now(),
+        });
+
+    await _pumpProjectDetail(
+      tester,
+      firestore: firestore,
+      teamId: 'team-a',
+      projectId: 'p-1',
+      uid: 'u-2',
+      email: 'u2@example.com',
+    );
+
+    expect(find.text('프로젝트 삭제'), findsNothing);
+  });
 }

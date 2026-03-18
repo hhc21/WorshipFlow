@@ -32,4 +32,48 @@ void main() {
       expect(engine.privateLayerStrokes, isEmpty);
     },
   );
+
+  test('shared-only visibility switches editable target to shared layer', () {
+    final engine = LiveCueStrokeEngine();
+    addTearDown(engine.dispose);
+    const canvasSize = Size(100, 100);
+
+    engine.setDrawingEnabled(true);
+    engine.setLayerVisibility(showPrivateLayer: false);
+
+    expect(engine.showPrivateLayer, isFalse);
+    expect(engine.showSharedLayer, isTrue);
+    expect(engine.editingSharedLayer, isTrue);
+
+    expect(engine.tapStroke(const Offset(40, 40), canvasSize), isTrue);
+    expect(engine.privateLayerStrokes, isEmpty);
+    expect(engine.sharedLayerStrokes.length, 1);
+
+    engine.setLayerVisibility(showSharedLayer: false);
+    expect(engine.showPrivateLayer, isFalse);
+    expect(engine.showSharedLayer, isTrue);
+    expect(engine.editingSharedLayer, isTrue);
+  });
+
+  test('selecting a hidden layer as edit target makes that layer visible', () {
+    final engine = LiveCueStrokeEngine();
+    addTearDown(engine.dispose);
+    const canvasSize = Size(100, 100);
+
+    engine.setDrawingEnabled(true);
+    engine.setLayerVisibility(showPrivateLayer: false);
+
+    expect(engine.showPrivateLayer, isFalse);
+    expect(engine.showSharedLayer, isTrue);
+    expect(engine.editingSharedLayer, isTrue);
+
+    engine.setEditingSharedLayer(false);
+    expect(engine.showPrivateLayer, isTrue);
+    expect(engine.showSharedLayer, isTrue);
+    expect(engine.editingSharedLayer, isFalse);
+
+    expect(engine.tapStroke(const Offset(24, 24), canvasSize), isTrue);
+    expect(engine.privateLayerStrokes.length, 1);
+    expect(engine.sharedLayerStrokes, isEmpty);
+  });
 }

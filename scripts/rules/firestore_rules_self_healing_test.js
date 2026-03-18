@@ -5,7 +5,7 @@ const {
   assertFails,
   assertSucceeds,
 } = require('@firebase/rules-unit-testing');
-const { doc, getDoc, setDoc } = require('firebase/firestore');
+const { deleteDoc, doc, getDoc, setDoc } = require('firebase/firestore');
 
 const projectId = process.env.FIREBASE_RULES_PROJECT || 'demo-worshipflow';
 const rulesPath = path.resolve(__dirname, '../../firestore.rules');
@@ -18,7 +18,7 @@ async function seed(testEnv) {
     await setDoc(doc(db, 'teams/team-alpha'), {
       name: 'Alpha Team',
       createdBy: 'owner-1',
-      memberUids: ['owner-1', 'member-1'],
+      memberUids: ['owner-1', 'member-1', 'leader-1'],
       createdAt: now,
     });
     await setDoc(doc(db, 'teams/team-alpha/members/owner-1'), {
@@ -37,11 +37,37 @@ async function seed(testEnv) {
       teamName: 'Alpha Team',
       createdAt: now,
     });
+    await setDoc(doc(db, 'teams/team-alpha/members/leader-1'), {
+      userId: 'leader-1',
+      uid: 'leader-1',
+      email: 'leader-1@example.com',
+      role: 'leader',
+      teamName: 'Alpha Team',
+      createdAt: now,
+    });
     await setDoc(doc(db, 'users/member-1/teamMemberships/team-alpha'), {
       teamId: 'team-alpha',
       teamName: 'Alpha Team',
       role: 'member',
       updatedAt: now,
+    });
+    await setDoc(doc(db, 'users/leader-1/teamMemberships/team-alpha'), {
+      teamId: 'team-alpha',
+      teamName: 'Alpha Team',
+      role: 'leader',
+      updatedAt: now,
+    });
+    await setDoc(doc(db, 'teams/team-alpha/projects/project-delete'), {
+      date: '2026.03.18',
+      title: '삭제 검증 프로젝트',
+      leaderUserId: 'leader-1',
+      createdAt: now,
+    });
+    await setDoc(doc(db, 'teams/team-alpha/projects/project-delete-denied'), {
+      date: '2026.03.19',
+      title: '삭제 거부 검증 프로젝트',
+      leaderUserId: 'leader-1',
+      createdAt: now,
     });
 
     // Legacy-like edge case: memberUids missing, membership mirror only.
@@ -85,6 +111,9 @@ async function run() {
       .firestore();
     const ownerDb = testEnv
       .authenticatedContext('owner-1', { email: 'owner-1@example.com' })
+      .firestore();
+    const leaderDb = testEnv
+      .authenticatedContext('leader-1', { email: 'leader-1@example.com' })
       .firestore();
     const owner2Db = testEnv
       .authenticatedContext('owner-2', { email: 'owner-2@example.com' })
@@ -137,6 +166,14 @@ async function run() {
     );
     await assertFails(getDoc(doc(outsiderDb, 'teams/team-alpha/opsMetrics/metric-1')));
     await assertSucceeds(getDoc(doc(ownerDb, 'teams/team-alpha/opsMetrics/metric-1')));
+
+    // 7) Only the project leader can delete the project doc.
+    await assertFails(
+      deleteDoc(doc(ownerDb, 'teams/team-alpha/projects/project-delete-denied')),
+    );
+    await assertSucceeds(
+      deleteDoc(doc(leaderDb, 'teams/team-alpha/projects/project-delete')),
+    );
 
     console.log('Firestore rules self-healing suite passed.');
   } finally {

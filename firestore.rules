@@ -441,7 +441,9 @@ service cloud.firestore {
 
       match /projects/{projectId} {
         allow read: if isTeamMember(teamId);
-        allow create, update, delete: if isTeamAdmin(teamId) || isProjectLeader(teamId, projectId);
+        allow create: if isTeamAdmin(teamId);
+        allow update: if isTeamAdmin(teamId) || isProjectLeader(teamId, projectId);
+        allow delete: if isProjectLeader(teamId, projectId);
 
         match /segmentA_setlist/{itemId} {
           allow read: if isTeamMember(teamId);
@@ -497,7 +499,8 @@ service cloud.firestore {
           && request.resource.data.teamId == teamId
           && request.resource.data.visibility == 'private'
           && request.resource.data.projectId == resource.data.projectId;
-        allow delete: if isTeamAdmin(teamId)
+        allow delete: if isProjectLeader(teamId, resource.data.projectId)
+          || isTeamAdmin(teamId)
           || (
             isTeamMember(teamId)
             && resource.data.userId == request.auth.uid
