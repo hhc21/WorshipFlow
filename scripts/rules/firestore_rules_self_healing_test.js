@@ -142,6 +142,9 @@ async function run() {
     const inviteLinkDb = testEnv
       .authenticatedContext('invitee-2', { email: 'Invitee2@Example.com' })
       .firestore();
+    const requesterDb = testEnv
+      .authenticatedContext('requester-1', { email: 'requester@example.com' })
+      .firestore();
 
     // 1) Non-member should not read team.
     await assertFails(getDoc(doc(outsiderDb, 'teams/team-alpha')));
@@ -199,7 +202,18 @@ async function run() {
       deleteDoc(doc(leaderDb, 'teams/team-alpha/projects/project-delete')),
     );
 
-    // 8) Invited user can read pending invite and accept it with membership mirrors.
+    // 8) Duplicate-name flow can create a join request for a non-member.
+    await assertSucceeds(
+      setDoc(doc(requesterDb, 'teams/team-alpha/joinRequests/requester-1'), {
+        requesterUid: 'requester-1',
+        requesterEmail: 'requester@example.com',
+        teamId: 'team-alpha',
+        teamName: 'Alpha Team',
+        status: 'pending',
+      }),
+    );
+
+    // 9) Invited user can read pending invite and accept it with membership mirrors.
     await assertSucceeds(
       getDoc(doc(invitedDb, 'teams/team-alpha/invites/invited@example.com')),
     );
@@ -242,7 +256,7 @@ async function run() {
       ),
     );
 
-    // 9) Active invite link can be consumed to create both membership mirrors.
+    // 10) Active invite link can be consumed to create both membership mirrors.
     await assertSucceeds(
       getDoc(doc(inviteLinkDb, 'teams/team-alpha/inviteLinks/link-alpha')),
     );

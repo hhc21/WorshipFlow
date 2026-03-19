@@ -301,21 +301,34 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     }
 
     final teamRef = firestore.collection('teams').doc(teamId);
-    final teamSnapshot = await teamRef.get().timeout(
-      const Duration(seconds: 10),
-    );
-    if (!teamSnapshot.exists) {
-      return _JoinRequestOutcome.unavailable;
-    }
-
-    final teamData = teamSnapshot.data() ?? const <String, dynamic>{};
-    final teamName = (teamData['name'] ?? fallbackTeamName).toString().trim();
-    final memberUidsRaw = teamData['memberUids'];
-    final memberUids = memberUidsRaw is List
-        ? memberUidsRaw.map((value) => value.toString()).toList()
-        : const <String>[];
-    if (memberUids.contains(user.uid)) {
-      return _JoinRequestOutcome.alreadyMember;
+    var teamName = fallbackTeamName.trim();
+    try {
+      final teamSnapshot = await teamRef.get().timeout(
+        const Duration(seconds: 10),
+      );
+      if (!teamSnapshot.exists) {
+        return _JoinRequestOutcome.unavailable;
+      }
+      final teamData = teamSnapshot.data() ?? const <String, dynamic>{};
+      final resolvedName = (teamData['name'] ?? fallbackTeamName)
+          .toString()
+          .trim();
+      if (resolvedName.isNotEmpty) {
+        teamName = resolvedName;
+      }
+      final memberUidsRaw = teamData['memberUids'];
+      final memberUids = memberUidsRaw is List
+          ? memberUidsRaw.map((value) => value.toString()).toList()
+          : const <String>[];
+      if (memberUids.contains(user.uid)) {
+        return _JoinRequestOutcome.alreadyMember;
+      }
+    } on FirebaseException catch (error) {
+      // Non-members cannot read the team doc directly. Keep the duplicate-name
+      // join request flow working by falling back to the indexed team name.
+      if (error.code != 'permission-denied') {
+        rethrow;
+      }
     }
 
     final memberDoc = await teamRef
@@ -448,11 +461,14 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       if (existingName.exists) {
         final existingData = existingName.data() ?? const <String, dynamic>{};
         final indexedTeamId = (existingData['teamId'] ?? '').toString().trim();
+        final indexedTeamName = (existingData['teamName'] ?? name)
+            .toString()
+            .trim();
         final outcome = await _requestJoinForExistingTeam(
           firestore: firestore,
           user: user,
           teamId: indexedTeamId,
-          fallbackTeamName: name,
+          fallbackTeamName: indexedTeamName.isEmpty ? name : indexedTeamName,
           teamNameKey: teamNameKey,
         );
         if (!context.mounted) return;
