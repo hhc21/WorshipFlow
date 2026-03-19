@@ -1090,7 +1090,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('이미 해당 팀에 참여 중입니다.')));
-        _invalidateMembershipCaches();
+        _refreshMembershipData();
         context.go('/teams/${invite.teamId}');
         return;
       }
@@ -1146,7 +1146,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         'memberUids': FieldValue.arrayUnion([user.uid]),
       }, SetOptions(merge: true));
       if (!context.mounted) return;
-      _invalidateMembershipCaches();
+      _refreshMembershipData();
       context.go('/teams/${invite.teamId}');
     } on FirebaseException catch (error) {
       if (error.code == 'permission-denied') {
@@ -1201,7 +1201,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       Future<void>.microtask(() => _syncOwnProfile(user));
     }
 
-    final email = user.email?.toLowerCase();
+    final email = user.email?.trim();
     final isWide = MediaQuery.of(context).size.width >= 900;
     final adminValue = ref.watch(globalAdminProvider);
     final isGlobalAdmin = adminValue.value ?? false;

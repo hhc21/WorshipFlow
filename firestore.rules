@@ -6,7 +6,9 @@ service cloud.firestore {
     }
 
     function userEmail() {
-      return request.auth.token.email;
+      return request.auth.token.email == null
+        ? null
+        : request.auth.token.email.lower();
     }
 
     function isGlobalAdmin() {

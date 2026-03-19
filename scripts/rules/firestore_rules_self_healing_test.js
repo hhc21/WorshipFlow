@@ -5,7 +5,7 @@ const {
   assertFails,
   assertSucceeds,
 } = require('@firebase/rules-unit-testing');
-const { deleteDoc, doc, getDoc, setDoc } = require('firebase/firestore');
+const { arrayUnion, deleteDoc, doc, getDoc, setDoc } = require('firebase/firestore');
 
 const projectId = process.env.FIREBASE_RULES_PROJECT || 'demo-worshipflow';
 const rulesPath = path.resolve(__dirname, '../../firestore.rules');
@@ -69,6 +69,23 @@ async function seed(testEnv) {
       leaderUserId: 'leader-1',
       createdAt: now,
     });
+    await setDoc(doc(db, 'teams/team-alpha/invites/invited@example.com'), {
+      email: 'invited@example.com',
+      role: 'member',
+      teamId: 'team-alpha',
+      teamName: 'Alpha Team',
+      status: 'pending',
+      createdBy: 'owner-1',
+      createdAt: now,
+    });
+    await setDoc(doc(db, 'teams/team-alpha/inviteLinks/link-alpha'), {
+      teamId: 'team-alpha',
+      teamName: 'Alpha Team',
+      role: 'member',
+      status: 'active',
+      createdBy: 'owner-1',
+      createdAt: now,
+    });
 
     // Legacy-like edge case: memberUids missing, membership mirror only.
     await setDoc(doc(db, 'teams/team-beta'), {
@@ -92,6 +109,7 @@ async function run() {
       'FIRESTORE_EMULATOR_HOST is not set. Run via firebase emulators:exec.',
     );
   }
+  const now = new Date().toISOString();
 
   const testEnv = await initializeTestEnvironment({
     projectId,
@@ -117,6 +135,12 @@ async function run() {
       .firestore();
     const owner2Db = testEnv
       .authenticatedContext('owner-2', { email: 'owner-2@example.com' })
+      .firestore();
+    const invitedDb = testEnv
+      .authenticatedContext('invitee-1', { email: 'Invited@Example.com' })
+      .firestore();
+    const inviteLinkDb = testEnv
+      .authenticatedContext('invitee-2', { email: 'Invitee2@Example.com' })
       .firestore();
 
     // 1) Non-member should not read team.
@@ -173,6 +197,82 @@ async function run() {
     );
     await assertSucceeds(
       deleteDoc(doc(leaderDb, 'teams/team-alpha/projects/project-delete')),
+    );
+
+    // 8) Invited user can read pending invite and accept it with membership mirrors.
+    await assertSucceeds(
+      getDoc(doc(invitedDb, 'teams/team-alpha/invites/invited@example.com')),
+    );
+    await assertSucceeds(
+      setDoc(doc(invitedDb, 'teams/team-alpha/members/invitee-1'), {
+        userId: 'invitee-1',
+        uid: 'invitee-1',
+        email: 'invited@example.com',
+        role: 'member',
+        teamName: 'Alpha Team',
+        createdAt: now,
+      }),
+    );
+    await assertSucceeds(
+      setDoc(doc(invitedDb, 'users/invitee-1/teamMemberships/team-alpha'), {
+        teamId: 'team-alpha',
+        teamName: 'Alpha Team',
+        role: 'member',
+        updatedAt: now,
+      }),
+    );
+    await assertSucceeds(
+      setDoc(
+        doc(invitedDb, 'teams/team-alpha'),
+        {
+          memberUids: arrayUnion('invitee-1'),
+        },
+        { merge: true },
+      ),
+    );
+    await assertSucceeds(
+      setDoc(
+        doc(invitedDb, 'teams/team-alpha/invites/invited@example.com'),
+        {
+          status: 'accepted',
+          acceptedBy: 'invitee-1',
+          acceptedAt: now,
+        },
+        { merge: true },
+      ),
+    );
+
+    // 9) Active invite link can be consumed to create both membership mirrors.
+    await assertSucceeds(
+      getDoc(doc(inviteLinkDb, 'teams/team-alpha/inviteLinks/link-alpha')),
+    );
+    await assertSucceeds(
+      setDoc(doc(inviteLinkDb, 'teams/team-alpha/members/invitee-2'), {
+        userId: 'invitee-2',
+        uid: 'invitee-2',
+        email: 'invitee2@example.com',
+        role: 'member',
+        teamName: 'Alpha Team',
+        inviteLinkId: 'link-alpha',
+        createdAt: now,
+      }),
+    );
+    await assertSucceeds(
+      setDoc(doc(inviteLinkDb, 'users/invitee-2/teamMemberships/team-alpha'), {
+        teamId: 'team-alpha',
+        teamName: 'Alpha Team',
+        role: 'member',
+        updatedAt: now,
+      }),
+    );
+    await assertSucceeds(
+      setDoc(
+        doc(inviteLinkDb, 'teams/team-alpha'),
+        {
+          memberUids: arrayUnion('invitee-2'),
+        },
+        { merge: true },
+      ),
     );
 
     console.log('Firestore rules self-healing suite passed.');
