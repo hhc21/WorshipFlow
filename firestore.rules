@@ -223,6 +223,16 @@ service cloud.firestore {
       allow create, update, delete: if false;
     }
 
+    // collectionGroup('invites') from TeamSelectPage requires a recursive
+    // wildcard matcher at the root level. The nested team invite rule is
+    // sufficient for direct doc get/update, but not for the collectionGroup
+    // list query used by "받은 초대".
+    match /{path=**}/invites/{inviteId} {
+      allow list: if isSignedIn()
+        && userEmail() != null
+        && resource.data.email == userEmail();
+    }
+
     match /teams/{teamId} {
       // Query-safe list rule (team list on home screen).
       allow list: if isGlobalAdmin() || isTeamMember(teamId);
@@ -357,7 +367,6 @@ service cloud.firestore {
       }
 
       match /invites/{inviteId} {
-        // Query-friendly list rule for collectionGroup('invites')
         allow list: if isTeamAdmin(teamId)
           || (isSignedIn() && userEmail() != null && userEmail() == resource.data.email);
         allow get: if isTeamAdmin(teamId)

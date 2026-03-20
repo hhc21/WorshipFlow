@@ -5,7 +5,17 @@ const {
   assertFails,
   assertSucceeds,
 } = require('@firebase/rules-unit-testing');
-const { arrayUnion, deleteDoc, doc, getDoc, setDoc } = require('firebase/firestore');
+const {
+  arrayUnion,
+  collectionGroup,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  where,
+} = require('firebase/firestore');
 
 const projectId = process.env.FIREBASE_RULES_PROJECT || 'demo-worshipflow';
 const rulesPath = path.resolve(__dirname, '../../firestore.rules');
@@ -83,6 +93,13 @@ async function seed(testEnv) {
       teamName: 'Alpha Team',
       role: 'member',
       status: 'active',
+      createdBy: 'owner-1',
+      createdAt: now,
+    });
+    await setDoc(doc(db, 'teamNameIndex/alpha-team'), {
+      teamId: 'team-alpha',
+      teamName: 'Alpha Team',
+      normalizedName: 'alpha-team',
       createdBy: 'owner-1',
       createdAt: now,
     });
@@ -202,7 +219,10 @@ async function run() {
       deleteDoc(doc(leaderDb, 'teams/team-alpha/projects/project-delete')),
     );
 
-    // 8) Duplicate-name flow can create a join request for a non-member.
+    // 8) Duplicate-name flow can create a join request for a non-member
+    // without relying on a direct team doc read.
+    await assertFails(getDoc(doc(requesterDb, 'teams/team-alpha')));
+    await assertSucceeds(getDoc(doc(requesterDb, 'teamNameIndex/alpha-team')));
     await assertSucceeds(
       setDoc(doc(requesterDb, 'teams/team-alpha/joinRequests/requester-1'), {
         requesterUid: 'requester-1',
@@ -212,10 +232,29 @@ async function run() {
         status: 'pending',
       }),
     );
+    await assertSucceeds(
+      getDoc(doc(requesterDb, 'teams/team-alpha/joinRequests/requester-1')),
+    );
 
     // 9) Invited user can read pending invite and accept it with membership mirrors.
     await assertSucceeds(
       getDoc(doc(invitedDb, 'teams/team-alpha/invites/invited@example.com')),
+    );
+    await assertSucceeds(
+      getDocs(
+        query(
+          collectionGroup(invitedDb, 'invites'),
+          where('email', '==', 'invited@example.com'),
+        ),
+      ),
+    );
+    await assertSucceeds(
+      getDocs(
+        query(
+          collectionGroup(memberDb, 'invites'),
+          where('email', '==', 'member-1@example.com'),
+        ),
+      ),
     );
     await assertSucceeds(
       setDoc(doc(invitedDb, 'teams/team-alpha/members/invitee-1'), {

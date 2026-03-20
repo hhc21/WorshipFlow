@@ -14,6 +14,13 @@ class BrowserFileSelection {
   });
 }
 
+class PendingTeamInviteLink {
+  final String teamId;
+  final String inviteCode;
+
+  const PendingTeamInviteLink({required this.teamId, required this.inviteCode});
+}
+
 abstract class BrowserPopupHandle {
   void navigate(String url);
 

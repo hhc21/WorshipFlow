@@ -6,6 +6,7 @@ import '../../app/ui_components.dart';
 import '../../services/firebase_providers.dart';
 import '../../utils/browser_helpers.dart';
 import '../../utils/clipboard_helper.dart';
+import 'team_entry_feedback.dart';
 
 class TeamInvitePanel extends ConsumerStatefulWidget {
   final String teamId;
@@ -67,9 +68,13 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
     if (email.isEmpty) return;
     if (!_emailPattern.hasMatch(email)) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('유효한 이메일 형식을 입력해 주세요.')));
+        title: '이메일 형식 확인 필요',
+        message: '유효한 이메일 형식을 입력해 주세요.',
+        icon: Icons.mark_email_unread_outlined,
+        isError: true,
+      );
       return;
     }
 
@@ -93,14 +98,21 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
 
       _emailController.clear();
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('초대가 전송되었습니다.')));
+        title: '초대 전송 완료',
+        message: '이메일 초대를 전송했습니다. 상대방은 "받은 초대"에서 바로 수락할 수 있습니다.',
+        icon: Icons.mark_email_read_outlined,
+      );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(SnackBar(content: Text('초대 실패: $error')));
+        title: '초대 전송 실패',
+        message: '초대를 저장하지 못했습니다.\n$error',
+        icon: Icons.error_outline,
+        isError: true,
+      );
     } finally {
       if (mounted) {
         setState(() => _saving = false);
@@ -344,17 +356,20 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
     }
   }
 
-  Stream<List<_JoinRequestInfo>> _watchPendingJoinRequests() {
+  Stream<List<_JoinRequestInfo>> _watchOpenJoinRequests() {
     final firestore = ref.read(firestoreProvider);
     return firestore
         .collection('teams')
         .doc(widget.teamId)
         .collection('joinRequests')
-        .where('status', isEqualTo: 'pending')
         .snapshots()
         .map((snapshot) {
           final requests = snapshot.docs
               .map(_JoinRequestInfo.fromDoc)
+              .where(
+                (request) =>
+                    request.status == 'pending' || request.status == 'invited',
+              )
               .toList(growable: false);
           requests.sort((a, b) {
             final aMs = a.createdAt?.millisecondsSinceEpoch ?? 0;
@@ -374,8 +389,12 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
     if (user == null) return;
     final email = request.email.trim().toLowerCase();
     if (email.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('요청자 이메일 정보가 없어 초대를 전송할 수 없습니다.')),
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '초대 전송 불가',
+        message: '요청자 이메일 정보가 없어 초대를 전송할 수 없습니다.',
+        icon: Icons.error_outline,
+        isError: true,
       );
       return;
     }
@@ -402,14 +421,22 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
             'updatedAt': FieldValue.serverTimestamp(),
           }, SetOptions(merge: true));
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${request.displayName} 님에게 초대를 전송했습니다.')),
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '합류 요청 처리 완료',
+        message:
+            '${request.displayName} 님에게 초대를 전송했습니다. 이 요청은 팀장 화면에서 "초대 전송됨" 상태로 계속 표시됩니다.',
+        icon: Icons.outgoing_mail,
       );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(SnackBar(content: Text('요청 처리 실패: $error')));
+        title: '합류 요청 처리 실패',
+        message: '요청을 초대로 전환하지 못했습니다.\n$error',
+        icon: Icons.error_outline,
+        isError: true,
+      );
     } finally {
       if (mounted) {
         setState(() {
@@ -489,7 +516,7 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
         ),
         const SizedBox(height: 8),
         StreamBuilder<List<_JoinRequestInfo>>(
-          stream: _watchPendingJoinRequests(),
+          stream: _watchOpenJoinRequests(),
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               return Text(
@@ -508,7 +535,7 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
             final requests = snapshot.data ?? const <_JoinRequestInfo>[];
             if (requests.isEmpty) {
               return Text(
-                '대기 중인 합류 요청이 없습니다.',
+                '대기 중이거나 초대 전송된 합류 요청이 없습니다.',
                 style: Theme.of(context).textTheme.bodySmall,
               );
             }
@@ -533,29 +560,48 @@ class _TeamInvitePanelState extends ConsumerState<TeamInvitePanel> {
                           title: Text(request.displayName),
                           subtitle: Text(
                             '${request.email.isEmpty ? '(이메일 없음)' : request.email}\n'
-                            '요청 시각: ${_formatRequestedAt(request.createdAt)}',
+                            '${request.statusLabel} · 요청 시각: ${_formatRequestedAt(request.createdAt)}',
                           ),
                           isThreeLine: true,
-                          trailing: FilledButton.tonal(
-                            onPressed:
-                                _processingJoinRequestUserIds.contains(
-                                      request.userId,
-                                    ) ||
-                                    request.email.isEmpty
-                                ? null
-                                : () => _inviteJoinRequester(context, request),
-                            child:
-                                _processingJoinRequestUserIds.contains(
-                                  request.userId,
+                          trailing: request.status == 'invited'
+                              ? FilledButton.tonal(
+                                  onPressed: null,
+                                  child: const Text('초대 전송됨'),
                                 )
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : const Text('초대 전송'),
+                              : FilledButton.tonal(
+                                  onPressed:
+                                      _processingJoinRequestUserIds.contains(
+                                            request.userId,
+                                          ) ||
+                                          request.email.isEmpty
+                                      ? null
+                                      : () => _inviteJoinRequester(
+                                          context,
+                                          request,
+                                        ),
+                                  child:
+                                      _processingJoinRequestUserIds.contains(
+                                        request.userId,
+                                      )
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Text('초대 전송'),
+                                ),
+                          leadingAndTrailingTextStyle: Theme.of(
+                            context,
+                          ).textTheme.bodySmall,
+                          titleTextStyle: Theme.of(
+                            context,
+                          ).textTheme.titleMedium,
+                          dense: false,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
                           ),
                         ),
                       ),
@@ -650,12 +696,14 @@ class _JoinRequestInfo {
   final String userId;
   final String email;
   final String displayName;
+  final String status;
   final DateTime? createdAt;
 
   const _JoinRequestInfo({
     required this.userId,
     required this.email,
     required this.displayName,
+    required this.status,
     required this.createdAt,
   });
 
@@ -668,6 +716,7 @@ class _JoinRequestInfo {
     final email = (data['requesterEmail'] ?? '').toString().trim();
     final nickname = (data['requesterNickname'] ?? '').toString().trim();
     final displayName = (data['requesterDisplayName'] ?? '').toString().trim();
+    final status = (data['status'] ?? 'pending').toString().trim();
     final fallbackName = nickname.isNotEmpty
         ? nickname
         : (displayName.isNotEmpty ? displayName : doc.id);
@@ -675,7 +724,18 @@ class _JoinRequestInfo {
       userId: doc.id,
       email: email,
       displayName: fallbackName,
+      status: status,
       createdAt: createdAt,
     );
+  }
+
+  String get statusLabel {
+    switch (status) {
+      case 'invited':
+        return '초대 전송됨';
+      case 'pending':
+      default:
+        return '팀장 확인 대기';
+    }
   }
 }

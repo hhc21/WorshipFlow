@@ -3,6 +3,7 @@ import 'package:worshipflow/utils/browser_helpers.dart';
 
 void main() {
   test('stub helpers return safe defaults in non-web tests', () async {
+    clearPendingTeamInviteLink();
     expect(await copyTextInBrowser('hello'), isFalse);
     expect(
       await shareTextLinkInBrowser(
@@ -19,5 +20,11 @@ void main() {
       isFalse,
     );
     expect(openBlankPopupWindow(), isNull);
+    savePendingTeamInviteLink(teamId: 'team-a', inviteCode: 'link-a');
+    final pending = loadPendingTeamInviteLink();
+    expect(pending?.teamId, 'team-a');
+    expect(pending?.inviteCode, 'link-a');
+    clearPendingTeamInviteLink();
+    expect(loadPendingTeamInviteLink(), isNull);
   });
 }

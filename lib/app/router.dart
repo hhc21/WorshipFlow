@@ -17,6 +17,7 @@ import '../features/songs/song_detail_page.dart';
 import '../features/teams/team_home_page.dart';
 import '../features/teams/team_select_page.dart';
 import '../services/firebase_providers.dart';
+import '../utils/browser_helpers.dart';
 
 bool _isSafeRedirectPath(String candidate) {
   if (candidate.isEmpty ||
@@ -45,6 +46,17 @@ final routerProvider = Provider<GoRouter>((ref) {
       final loggingIn = state.matchedLocation == '/sign-in';
       if (user == null) {
         if (loggingIn) return null;
+        final inviteTeamId = state.uri.queryParameters['inviteTeam'];
+        final inviteCode = state.uri.queryParameters['inviteCode'];
+        if (inviteTeamId != null &&
+            inviteCode != null &&
+            inviteTeamId.trim().isNotEmpty &&
+            inviteCode.trim().isNotEmpty) {
+          savePendingTeamInviteLink(
+            teamId: inviteTeamId.trim(),
+            inviteCode: inviteCode.trim(),
+          );
+        }
         final target = state.uri.toString();
         return '/sign-in?redirect=${Uri.encodeComponent(target)}';
       }

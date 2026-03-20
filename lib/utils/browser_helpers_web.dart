@@ -142,3 +142,39 @@ BrowserPopupHandle? openBlankPopupWindow() {
     return null;
   }
 }
+
+const _pendingInviteTeamIdKey = 'wf_pending_invite_team_id';
+const _pendingInviteCodeKey = 'wf_pending_invite_code';
+
+void savePendingTeamInviteLink({
+  required String teamId,
+  required String inviteCode,
+}) {
+  try {
+    html.window.sessionStorage[_pendingInviteTeamIdKey] = teamId;
+    html.window.sessionStorage[_pendingInviteCodeKey] = inviteCode;
+  } catch (_) {}
+}
+
+PendingTeamInviteLink? loadPendingTeamInviteLink() {
+  try {
+    final teamId = html.window.sessionStorage[_pendingInviteTeamIdKey];
+    final inviteCode = html.window.sessionStorage[_pendingInviteCodeKey];
+    if (teamId == null ||
+        teamId.trim().isEmpty ||
+        inviteCode == null ||
+        inviteCode.trim().isEmpty) {
+      return null;
+    }
+    return PendingTeamInviteLink(teamId: teamId, inviteCode: inviteCode);
+  } catch (_) {
+    return null;
+  }
+}
+
+void clearPendingTeamInviteLink() {
+  try {
+    html.window.sessionStorage.remove(_pendingInviteTeamIdKey);
+    html.window.sessionStorage.remove(_pendingInviteCodeKey);
+  } catch (_) {}
+}

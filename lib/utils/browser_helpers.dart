@@ -24,3 +24,13 @@ bool downloadUrlInBrowser(String url, {String? fileName}) =>
     impl.downloadUrlInBrowser(url, fileName: fileName);
 
 BrowserPopupHandle? openBlankPopupWindow() => impl.openBlankPopupWindow();
+
+void savePendingTeamInviteLink({
+  required String teamId,
+  required String inviteCode,
+}) => impl.savePendingTeamInviteLink(teamId: teamId, inviteCode: inviteCode);
+
+PendingTeamInviteLink? loadPendingTeamInviteLink() =>
+    impl.loadPendingTeamInviteLink();
+
+void clearPendingTeamInviteLink() => impl.clearPendingTeamInviteLink();

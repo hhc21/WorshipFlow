@@ -9,9 +9,12 @@ import 'package:go_router/go_router.dart';
 import '../../app/ui_components.dart';
 import '../../core/roles.dart';
 import '../../services/firebase_providers.dart';
+import '../../utils/browser_helpers.dart';
+import '../../utils/browser_types.dart';
 import '../../utils/firestore_id.dart';
 import '../../utils/team_name.dart';
 import '../songs/global_song_panel.dart';
+import 'team_entry_feedback.dart';
 
 class TeamSelectPage extends ConsumerStatefulWidget {
   final String? inviteTeamId;
@@ -31,8 +34,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
   String? _cachedNickname;
   Future<List<_TeamMembership>>? _teamsFuture;
   String? _teamsFutureUid;
-  Future<List<_InviteInfo>>? _invitesFuture;
-  String? _invitesFutureEmail;
 
   @override
   void dispose() {
@@ -43,8 +44,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
   void _invalidateMembershipCaches() {
     _teamsFuture = null;
     _teamsFutureUid = null;
-    _invitesFuture = null;
-    _invitesFutureEmail = null;
   }
 
   Future<List<_TeamMembership>> _fetchTeamsCached(String uid) {
@@ -56,18 +55,33 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     return _teamsFuture!;
   }
 
-  Future<List<_InviteInfo>> _fetchInvitesCached(String email) {
-    final normalized = email.toLowerCase();
-    if (_invitesFuture != null && _invitesFutureEmail == normalized) {
-      return _invitesFuture!;
-    }
-    _invitesFutureEmail = normalized;
-    _invitesFuture = _fetchInvites(normalized);
-    return _invitesFuture!;
-  }
-
   void _refreshMembershipData() {
     setState(_invalidateMembershipCaches);
+  }
+
+  PendingTeamInviteLink? _currentRouteInviteLink() {
+    final teamId = widget.inviteTeamId?.trim() ?? '';
+    final inviteCode = widget.inviteCode?.trim() ?? '';
+    if (!isValidFirestoreDocId(teamId) || !isValidFirestoreDocId(inviteCode)) {
+      return null;
+    }
+    return PendingTeamInviteLink(teamId: teamId, inviteCode: inviteCode);
+  }
+
+  PendingTeamInviteLink? _effectiveInviteLink() {
+    final routeInvite = _currentRouteInviteLink();
+    if (routeInvite != null) {
+      savePendingTeamInviteLink(
+        teamId: routeInvite.teamId,
+        inviteCode: routeInvite.inviteCode,
+      );
+      return routeInvite;
+    }
+    return loadPendingTeamInviteLink();
+  }
+
+  void _clearEffectiveInviteLink() {
+    clearPendingTeamInviteLink();
   }
 
   void _openTeamHome(BuildContext context, String teamId) {
@@ -301,34 +315,22 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     }
 
     final teamRef = firestore.collection('teams').doc(teamId);
-    var teamName = fallbackTeamName.trim();
-    try {
-      final teamSnapshot = await teamRef.get().timeout(
-        const Duration(seconds: 10),
-      );
-      if (!teamSnapshot.exists) {
-        return _JoinRequestOutcome.unavailable;
-      }
-      final teamData = teamSnapshot.data() ?? const <String, dynamic>{};
-      final resolvedName = (teamData['name'] ?? fallbackTeamName)
-          .toString()
-          .trim();
-      if (resolvedName.isNotEmpty) {
-        teamName = resolvedName;
-      }
-      final memberUidsRaw = teamData['memberUids'];
-      final memberUids = memberUidsRaw is List
-          ? memberUidsRaw.map((value) => value.toString()).toList()
-          : const <String>[];
-      if (memberUids.contains(user.uid)) {
-        return _JoinRequestOutcome.alreadyMember;
-      }
-    } on FirebaseException catch (error) {
-      // Non-members cannot read the team doc directly. Keep the duplicate-name
-      // join request flow working by falling back to the indexed team name.
-      if (error.code != 'permission-denied') {
-        rethrow;
-      }
+    final teamName = fallbackTeamName.trim();
+
+    // Duplicate-name requests must not depend on a direct read of teams/{teamId}.
+    // Non-members are not allowed to read the team doc, so this flow only uses
+    // data the requester can already access safely:
+    // - teamNameIndex payload
+    // - own membership mirror
+    // - own team member mirror doc
+    // - own joinRequest doc
+    final ownMembershipDoc = await _userTeamMembershipRef(
+      firestore: firestore,
+      uid: user.uid,
+      teamId: teamId,
+    ).get().timeout(const Duration(seconds: 10));
+    if (ownMembershipDoc.exists) {
+      return _JoinRequestOutcome.alreadyMember;
     }
 
     final memberDoc = await teamRef
@@ -373,22 +375,56 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     return _JoinRequestOutcome.submitted;
   }
 
+  List<_InviteInfo> _mapInviteDocs(
+    Iterable<QueryDocumentSnapshot<Map<String, dynamic>>> docs,
+  ) {
+    final invites = <_InviteInfo>[];
+    final seenPaths = <String>{};
+    for (final doc in docs) {
+      if (!seenPaths.add(doc.reference.path)) continue;
+      final data = doc.data();
+      if ((data['status'] ?? '').toString().trim() != 'pending') {
+        continue;
+      }
+      final teamId = doc.reference.parent.parent?.id ?? '';
+      if (!isValidFirestoreDocId(teamId)) continue;
+      invites.add(
+        _InviteInfo(
+          teamId: teamId,
+          teamName: (data['teamName'] ?? '팀').toString(),
+          role: (data['role'] ?? 'member').toString(),
+          docId: doc.id,
+        ),
+      );
+    }
+    invites.sort((a, b) => a.teamName.compareTo(b.teamName));
+    return invites;
+  }
+
   Future<void> _createTeam(BuildContext context) async {
     if (_creating) return;
     final rawName = _teamNameController.text;
     final name = normalizeTeamName(rawName);
     if (name.isEmpty) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('팀 이름을 입력해 주세요.')));
+        title: '팀 이름 입력 필요',
+        message: '팀 이름을 입력해 주세요.',
+        icon: Icons.groups_outlined,
+        isError: true,
+      );
       return;
     }
     if (name.length > 40) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('팀 이름은 40자 이내로 입력해 주세요.')));
+        title: '팀 이름 길이 확인 필요',
+        message: '팀 이름은 40자 이내로 입력해 주세요.',
+        icon: Icons.rule_folder_outlined,
+        isError: true,
+      );
       return;
     }
 
@@ -431,36 +467,6 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       if (existingName.exists) {
         final existingData = existingName.data() ?? const <String, dynamic>{};
         final indexedTeamId = (existingData['teamId'] ?? '').toString().trim();
-        var staleIndex =
-            indexedTeamId.isEmpty || !isValidFirestoreDocId(indexedTeamId);
-        if (!staleIndex) {
-          try {
-            final indexedTeam = await firestore
-                .collection('teams')
-                .doc(indexedTeamId)
-                .get();
-            staleIndex = !indexedTeam.exists;
-          } on FirebaseException catch (error) {
-            if (error.code == 'permission-denied') {
-              staleIndex = false;
-            } else {
-              rethrow;
-            }
-          }
-        }
-
-        if (staleIndex) {
-          try {
-            await nameIndexRef.delete();
-            existingName = await nameIndexRef.get();
-          } on FirebaseException {
-            throw const _TeamNameAlreadyExistsException();
-          }
-        }
-      }
-      if (existingName.exists) {
-        final existingData = existingName.data() ?? const <String, dynamic>{};
-        final indexedTeamId = (existingData['teamId'] ?? '').toString().trim();
         final indexedTeamName = (existingData['teamName'] ?? name)
             .toString()
             .trim();
@@ -474,32 +480,38 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         if (!context.mounted) return;
         switch (outcome) {
           case _JoinRequestOutcome.submitted:
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  '동일 이름 팀이 이미 있어 팀장에게 초대 요청을 보냈습니다. 받은 초대를 수락해 주세요.',
-                ),
-              ),
+            await showTeamEntryFeedbackDialog(
+              context,
+              title: '합류 요청 전송 완료',
+              message:
+                  '동일 이름 팀이 이미 있어 팀장에게 초대 요청을 보냈습니다. 팀장은 "합류 요청" 목록에서 이 요청을 확인하고 바로 초대를 보낼 수 있습니다.',
+              icon: Icons.outgoing_mail,
             );
             return;
           case _JoinRequestOutcome.alreadyRequested:
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('이미 초대 요청을 보냈습니다. 팀장의 초대를 기다려 주세요.'),
-              ),
+            await showTeamEntryFeedbackDialog(
+              context,
+              title: '이미 요청됨',
+              message: '이미 초대 요청을 보냈습니다. 팀장의 초대를 기다려 주세요.',
+              icon: Icons.schedule,
             );
             return;
           case _JoinRequestOutcome.alreadyMember:
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('이미 해당 팀에 참여 중입니다. 내 팀 목록에서 기존 팀을 선택해 주세요.'),
-              ),
+            await showTeamEntryFeedbackDialog(
+              context,
+              title: '이미 참여 중인 팀입니다',
+              message: '이미 해당 팀에 참여 중입니다. "내 팀" 목록에서 기존 팀을 선택해 주세요.',
+              icon: Icons.groups_2_rounded,
             );
             _refreshMembershipData();
             return;
           case _JoinRequestOutcome.requiresEmail:
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('초대 요청을 보내려면 이메일 계정으로 로그인해 주세요.')),
+            await showTeamEntryFeedbackDialog(
+              context,
+              title: '이메일 로그인 필요',
+              message: '초대 요청을 보내려면 이메일 계정으로 로그인해 주세요.',
+              icon: Icons.alternate_email,
+              isError: true,
             );
             return;
           case _JoinRequestOutcome.unavailable:
@@ -574,29 +586,39 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       context.go('/teams/${teamRef.id}');
     } on _TeamNameAlreadyExistsException {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('이미 존재하는 팀 이름입니다. 팀장에게 초대를 요청해 주세요.')),
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '이미 존재하는 팀 이름입니다',
+        message: '같은 이름의 팀이 이미 존재합니다. 팀장에게 초대를 요청해 주세요.',
+        icon: Icons.groups_2_rounded,
+        isError: true,
       );
     } on _TeamNameCheckUnavailableException {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            '팀명 중복 확인 권한을 불러오지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.',
-          ),
-        ),
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '팀명 확인 실패',
+        message: '팀명 중복 확인 권한을 불러오지 못했습니다. 잠시 후 다시 시도하거나 관리자에게 문의해 주세요.',
+        icon: Icons.error_outline,
+        isError: true,
       );
     } on _InvalidTeamNameException {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('유효한 팀 이름을 입력해 주세요.')));
+        title: '유효한 팀 이름이 아닙니다',
+        message: '사용 가능한 팀 이름을 입력해 주세요.',
+        icon: Icons.warning_amber_rounded,
+        isError: true,
+      );
     } on TimeoutException {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('팀 생성 요청이 지연되고 있습니다. 네트워크 상태를 확인 후 다시 시도해 주세요.'),
-        ),
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '팀 생성 요청 지연',
+        message: '팀 생성 요청이 지연되고 있습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.',
+        icon: Icons.schedule_send_outlined,
+        isError: true,
       );
     } catch (error) {
       if (!teamCreated && nameReserved) {
@@ -607,9 +629,13 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         }
       }
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(SnackBar(content: Text('팀 생성 실패: $error')));
+        title: '팀 생성 실패',
+        message: '팀 생성 중 오류가 발생했습니다.\n$error',
+        icon: Icons.error_outline,
+        isError: true,
+      );
     } finally {
       if (mounted) {
         setState(() => _creating = false);
@@ -879,70 +905,17 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     }
   }
 
-  Future<List<_InviteInfo>> _fetchInvites(String email) async {
+  Stream<List<_InviteInfo>> _watchInvites(String email) {
     final firestore = ref.read(firestoreProvider);
-    final inviteDocs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-    final seen = <String>{};
-    final candidates = {email, email.toLowerCase()}
-      ..removeWhere((value) => value.trim().isEmpty);
-
-    for (final candidate in candidates) {
-      try {
-        final snapshot = await firestore
-            .collectionGroup('invites')
-            .where('email', isEqualTo: candidate)
-            .where('status', isEqualTo: 'pending')
-            .get()
-            .timeout(const Duration(seconds: 12));
-        for (final doc in snapshot.docs) {
-          if (seen.add(doc.reference.path)) {
-            inviteDocs.add(doc);
-          }
-        }
-      } on FirebaseException catch (error) {
-        if (error.code == 'failed-precondition') {
-          final fallback = await firestore
-              .collectionGroup('invites')
-              .where('email', isEqualTo: candidate)
-              .get()
-              .timeout(const Duration(seconds: 12));
-          for (final doc in fallback.docs) {
-            final data = doc.data();
-            if ((data['status'] ?? '').toString() != 'pending') continue;
-            if (seen.add(doc.reference.path)) {
-              inviteDocs.add(doc);
-            }
-          }
-          continue;
-        }
-        if (error.code == 'permission-denied') {
-          return [];
-        }
-        rethrow;
-      } on TimeoutException {
-        return [];
-      }
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isEmpty) {
+      return Stream.value(const <_InviteInfo>[]);
     }
-
-    final invites =
-        inviteDocs
-            .map((doc) {
-              final data = doc.data();
-              final teamId = doc.reference.parent.parent?.id ?? '';
-              if (!isValidFirestoreDocId(teamId)) {
-                return null;
-              }
-              return _InviteInfo(
-                teamId: teamId,
-                teamName: (data['teamName'] ?? '팀').toString(),
-                role: (data['role'] ?? 'member').toString(),
-                docId: doc.id,
-              );
-            })
-            .whereType<_InviteInfo>()
-            .toList()
-          ..sort((a, b) => a.teamName.compareTo(b.teamName));
-    return invites;
+    return firestore
+        .collectionGroup('invites')
+        .where('email', isEqualTo: normalizedEmail)
+        .snapshots()
+        .map((snapshot) => _mapInviteDocs(snapshot.docs));
   }
 
   Future<void> _acceptInvite(BuildContext context, _InviteInfo invite) async {
@@ -951,10 +924,13 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     final user = auth.currentUser;
     if (user == null) return;
     if (!isValidFirestoreDocId(invite.teamId)) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('잘못된 팀 초대 정보입니다.')));
+        title: '초대 정보 오류',
+        message: '잘못된 팀 초대 정보입니다.',
+        icon: Icons.error_outline,
+        isError: true,
+      );
       return;
     }
 
@@ -968,9 +944,12 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       final existingMember = await memberRef.get();
       if (existingMember.exists) {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(
+        await showTeamEntryFeedbackDialog(
           context,
-        ).showSnackBar(const SnackBar(content: Text('이미 해당 팀에 참여 중입니다.')));
+          title: '이미 참여 중입니다',
+          message: '이미 해당 팀에 참여 중입니다. "내 팀"에서 바로 이동할 수 있습니다.',
+          icon: Icons.groups_2_rounded,
+        );
         _refreshMembershipData();
         return;
       }
@@ -979,9 +958,13 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       final inviteSnapshot = await inviteRef.get();
       if (!inviteSnapshot.exists) {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(
+        await showTeamEntryFeedbackDialog(
           context,
-        ).showSnackBar(const SnackBar(content: Text('초대가 만료되었거나 삭제되었습니다.')));
+          title: '초대를 찾을 수 없습니다',
+          message: '초대가 만료되었거나 삭제되었습니다.',
+          icon: Icons.mark_email_unread_outlined,
+          isError: true,
+        );
         _refreshMembershipData();
         return;
       }
@@ -989,9 +972,12 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       final inviteStatus = (inviteData['status'] ?? '').toString();
       if (inviteStatus != 'pending') {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(
+        await showTeamEntryFeedbackDialog(
           context,
-        ).showSnackBar(const SnackBar(content: Text('이미 처리된 초대입니다.')));
+          title: '이미 처리된 초대입니다',
+          message: '이 초대는 이미 처리되었습니다.',
+          icon: Icons.info_outline,
+        );
         _refreshMembershipData();
         return;
       }
@@ -1029,16 +1015,23 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
         'acceptedAt': FieldValue.serverTimestamp(),
         'acceptedBy': user.uid,
       }, SetOptions(merge: true));
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('팀 초대를 수락했습니다.')));
       _refreshMembershipData();
+      if (!context.mounted) return;
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '팀 참여 완료',
+        message: '$resolvedTeamName 팀에 참여했습니다. 이제 "내 팀" 목록에서 바로 이동할 수 있습니다.',
+        icon: Icons.verified_rounded,
+      );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(SnackBar(content: Text('초대 수락 실패: $error')));
+        title: '초대 수락 실패',
+        message: '팀 참여를 완료하지 못했습니다.\n$error',
+        icon: Icons.error_outline,
+        isError: true,
+      );
     }
   }
 
@@ -1047,6 +1040,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     String inviteCode,
   ) async {
     if (!isValidFirestoreDocId(teamId) || !isValidFirestoreDocId(inviteCode)) {
+      _clearEffectiveInviteLink();
       return null;
     }
     final firestore = ref.read(firestoreProvider);
@@ -1058,16 +1052,22 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
           .collection('inviteLinks')
           .doc(inviteCode)
           .get();
-    } on FirebaseException catch (error) {
-      if (error.code == 'permission-denied') {
-        return null;
-      }
+    } on FirebaseException {
       rethrow;
     }
-    if (!doc.exists) return null;
+    if (!doc.exists) {
+      _clearEffectiveInviteLink();
+      return null;
+    }
     final data = doc.data();
-    if (data == null) return null;
-    if ((data['status'] ?? '').toString() != 'active') return null;
+    if (data == null) {
+      _clearEffectiveInviteLink();
+      return null;
+    }
+    if ((data['status'] ?? '').toString() != 'active') {
+      _clearEffectiveInviteLink();
+      return null;
+    }
     return _InviteLinkInfo(
       teamId: teamId,
       inviteCode: inviteCode,
@@ -1086,10 +1086,14 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     if (user == null) return;
     if (!isValidFirestoreDocId(invite.teamId) ||
         !isValidFirestoreDocId(invite.inviteCode)) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      _clearEffectiveInviteLink();
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(const SnackBar(content: Text('잘못된 링크 초대 정보입니다.')));
+        title: '초대 링크 오류',
+        message: '잘못된 링크 초대 정보입니다.',
+        icon: Icons.link_off,
+        isError: true,
+      );
       return;
     }
 
@@ -1102,12 +1106,16 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
           .doc(user.uid);
       final existingMember = await memberRef.get();
       if (existingMember.exists) {
-        if (!context.mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('이미 해당 팀에 참여 중입니다.')));
         _refreshMembershipData();
-        context.go('/teams/${invite.teamId}');
+        _clearEffectiveInviteLink();
+        if (!context.mounted) return;
+        await showTeamEntryFeedbackDialog(
+          context,
+          title: '이미 참여 중인 팀입니다',
+          message: '이미 해당 팀에 참여 중입니다. 확인을 누르면 팀 홈으로 이동합니다.',
+          icon: Icons.groups_2_rounded,
+          onConfirmed: () => context.go('/teams/${invite.teamId}'),
+        );
         return;
       }
       final teamRef = firestore.collection('teams').doc(invite.teamId);
@@ -1116,19 +1124,29 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
           .doc(invite.inviteCode);
       final inviteLinkSnapshot = await inviteLinkRef.get();
       if (!inviteLinkSnapshot.exists) {
+        _clearEffectiveInviteLink();
         if (!context.mounted) return;
-        ScaffoldMessenger.of(
+        await showTeamEntryFeedbackDialog(
           context,
-        ).showSnackBar(const SnackBar(content: Text('초대 링크가 만료되었습니다.')));
+          title: '초대 링크 만료',
+          message: '초대 링크가 만료되었거나 삭제되었습니다. 팀장에게 새 링크를 요청해 주세요.',
+          icon: Icons.link_off,
+          isError: true,
+        );
         return;
       }
       final inviteLinkData =
           inviteLinkSnapshot.data() ?? const <String, dynamic>{};
       if ((inviteLinkData['status'] ?? '').toString() != 'active') {
+        _clearEffectiveInviteLink();
         if (!context.mounted) return;
-        ScaffoldMessenger.of(
+        await showTeamEntryFeedbackDialog(
           context,
-        ).showSnackBar(const SnackBar(content: Text('비활성화된 링크입니다.')));
+          title: '비활성화된 링크입니다',
+          message: '이 초대 링크는 더 이상 사용할 수 없습니다.',
+          icon: Icons.link_off,
+          isError: true,
+        );
         return;
       }
       final resolvedTeamName = (inviteLinkData['teamName'] ?? invite.teamName)
@@ -1161,28 +1179,36 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       await teamRef.set({
         'memberUids': FieldValue.arrayUnion([user.uid]),
       }, SetOptions(merge: true));
-      if (!context.mounted) return;
       _refreshMembershipData();
-      context.go('/teams/${invite.teamId}');
-    } on FirebaseException catch (error) {
-      if (error.code == 'permission-denied') {
-        if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('링크 권한이 만료되었거나 이미 사용되었습니다. 팀장에게 새 링크를 요청해 주세요.'),
-          ),
-        );
-        return;
-      }
+      _clearEffectiveInviteLink();
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('링크 초대 수락 실패: ${error.message ?? error.code}')),
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '팀 참여 완료',
+        message: '$resolvedTeamName 팀에 참여했습니다. 확인을 누르면 팀 홈으로 이동합니다.',
+        icon: Icons.verified_rounded,
+        onConfirmed: () => context.go('/teams/${invite.teamId}'),
+      );
+    } on FirebaseException catch (error) {
+      if (!context.mounted) return;
+      await showTeamEntryFeedbackDialog(
+        context,
+        title: '링크 초대 수락 실패',
+        message: error.code == 'permission-denied'
+            ? '링크 권한이 만료되었거나 접근이 거부되었습니다. 팀장에게 새 링크를 요청해 주세요.'
+            : '링크 초대 수락에 실패했습니다.\n${error.message ?? error.code}',
+        icon: Icons.error_outline,
+        isError: true,
       );
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(
+      await showTeamEntryFeedbackDialog(
         context,
-      ).showSnackBar(SnackBar(content: Text('링크 초대 수락 실패: $error')));
+        title: '링크 초대 수락 실패',
+        message: '팀 참여를 완료하지 못했습니다.\n$error',
+        icon: Icons.error_outline,
+        isError: true,
+      );
     }
   }
 
@@ -1218,6 +1244,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
     }
 
     final email = user.email?.trim();
+    final effectiveInviteLink = _effectiveInviteLink();
     final isWide = MediaQuery.of(context).size.width >= 900;
     final adminValue = ref.watch(globalAdminProvider);
     final isGlobalAdmin = adminValue.value ?? false;
@@ -1226,14 +1253,14 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
       _TeamsTab(
         user: user,
         email: email,
-        fetchInvites: _fetchInvitesCached,
+        watchInvites: _watchInvites,
         acceptInvite: _acceptInvite,
         fetchTeams: _fetchTeamsCached,
         teamNameController: _teamNameController,
         creating: _creating,
         onCreateTeam: _createTeam,
-        inviteTeamId: widget.inviteTeamId,
-        inviteCode: widget.inviteCode,
+        inviteTeamId: effectiveInviteLink?.teamId,
+        inviteCode: effectiveInviteLink?.inviteCode,
         fetchInviteLink: _fetchInviteLink,
         acceptInviteLink: _acceptInviteLink,
         onRefresh: _refreshMembershipData,
@@ -1408,7 +1435,7 @@ class _TeamSelectPageState extends ConsumerState<TeamSelectPage> {
 class _TeamsTab extends StatelessWidget {
   final User user;
   final String? email;
-  final Future<List<_InviteInfo>> Function(String email) fetchInvites;
+  final Stream<List<_InviteInfo>> Function(String email) watchInvites;
   final Future<void> Function(BuildContext context, _InviteInfo invite)
   acceptInvite;
   final Future<List<_TeamMembership>> Function(String uid) fetchTeams;
@@ -1427,7 +1454,7 @@ class _TeamsTab extends StatelessWidget {
   const _TeamsTab({
     required this.user,
     required this.email,
-    required this.fetchInvites,
+    required this.watchInvites,
     required this.acceptInvite,
     required this.fetchTeams,
     required this.teamNameController,
@@ -1659,9 +1686,9 @@ class _TeamsTab extends StatelessWidget {
         : AppSectionCard(
             icon: Icons.mark_email_unread_outlined,
             title: '받은 초대',
-            subtitle: '대기 중인 팀 초대를 수락할 수 있습니다.',
-            child: FutureBuilder<List<_InviteInfo>>(
-              future: fetchInvites(email!),
+            subtitle: '대기 중인 팀 초대를 실시간으로 확인하고 수락할 수 있습니다.',
+            child: StreamBuilder<List<_InviteInfo>>(
+              stream: watchInvites(email!),
               builder: (context, snapshot) {
                 if (snapshot.connectionState == ConnectionState.waiting) {
                   return const AppLoadingState(message: '초대 목록 불러오는 중...');
@@ -1670,8 +1697,9 @@ class _TeamsTab extends StatelessWidget {
                   return AppStateCard(
                     icon: Icons.error_outline,
                     isError: true,
-                    title: '초대 목록 로드 실패',
-                    message: _friendlyAsyncError(snapshot.error),
+                    title: '초대 목록을 불러오지 못했습니다',
+                    message:
+                        '받은 초대 조회가 실패했습니다. 권한 또는 네트워크 상태를 확인해 주세요.\n${_friendlyAsyncError(snapshot.error)}',
                     actionLabel: '다시 시도',
                     onAction: onRefresh,
                   );
@@ -1808,6 +1836,10 @@ class _TeamsTab extends StatelessWidget {
                       flex: 7,
                       child: Column(
                         children: [
+                          if (inviteTeamId != null && inviteCode != null) ...[
+                            inviteLinkSection,
+                            const SizedBox(height: 14),
+                          ],
                           teamsSection,
                           const SizedBox(height: 14),
                           invitesSection,
@@ -1819,10 +1851,6 @@ class _TeamsTab extends StatelessWidget {
                       flex: 5,
                       child: Column(
                         children: [
-                          if (inviteTeamId != null && inviteCode != null) ...[
-                            inviteLinkSection,
-                            const SizedBox(height: 14),
-                          ],
                           guideSection,
                           const SizedBox(height: 14),
                           createTeamSection,
@@ -1832,15 +1860,15 @@ class _TeamsTab extends StatelessWidget {
                   ],
                 )
               else ...[
+                if (inviteTeamId != null && inviteCode != null) ...[
+                  inviteLinkSection,
+                  const SizedBox(height: 14),
+                ],
                 guideSection,
                 const SizedBox(height: 14),
                 teamsSection,
                 const SizedBox(height: 14),
                 invitesSection,
-                if (inviteTeamId != null && inviteCode != null) ...[
-                  const SizedBox(height: 14),
-                  inviteLinkSection,
-                ],
                 const SizedBox(height: 14),
                 createTeamSection,
               ],
